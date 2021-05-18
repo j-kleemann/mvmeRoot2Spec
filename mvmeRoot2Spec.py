@@ -121,13 +121,13 @@ os.makedirs(outDir, exist_ok=True)
 
 # Hardcoded settings
 mvmeModulesChannelsDict = {
-  'clover_135/amplitude_clover_135[16]': range(16),
-  'clover_90/amplitude_clover_90[16]': range(16),
-  'cebr/integration_long[16]': range(16),
+  'clovers_up/amplitude[16]': range(16),
+  'clovers_down/amplitude[16]': range(8),
+  'scintillators/integration_long[16]': range(14),
 }
 addbackChannelDict = {
-  'clover_135/amplitude_clover_135[16]': {1: [0, 1, 2, 3], 2: [4, 5, 6, 7], 3: [8, 9, 10, 11], 4: [12, 13, 14, 15]},
-  'clover_90/amplitude_clover_90[16]':   {1: [0, 1, 2, 3], 2: [4, 5, 6, 7], 3: [8, 9, 10, 11], 4: [12, 13, 14, 15]},
+  'clovers_up/amplitude[16]': {1: [0, 1, 2, 3], 2: [4, 5, 6, 7], 3: [8, 9, 10, 11], 4: [12, 13, 14, 15]},
+  'clovers_down/amplitude[16]':   {1: [0, 1, 2, 3], 2: [4, 5, 6, 7], 3: [8, 9, 10, 11], 4: [12, 13, 14, 15]},
 }
 
 # Global variables and constants
@@ -200,7 +200,7 @@ def processDataBlock(dataID, data) :
 def processAddbackDataBlock(dataID, channels, data) :
   addbackData = np.zeros(data.shape[1])
   for channelNo, channelData in zip(channels, data) :
-    calName = getHistFilenamePrefix(*dataID[:2], f"Det_{channelNo+1}")
+    calName = getHistFilenamePrefix(*dataID[:2], f"Det_{channelNo+1:02}")
     if calName not in calsDict :
       return
     # To optimize performance one could try reusing the calibrated data from the processDataBlock call, but beware that 
@@ -226,7 +226,7 @@ with uproot.open(rootFilePath, num_workers=os.cpu_count(), decompression_executo
         for channelNo in mvmeModulesChannelsDict[moduleName] :
           detData = moduleData[:,channelNo]
           detData = detData[~np.isnan(detData)]
-          processDataBlock((rootFilePath, moduleName, f"Det_{channelNo+1}"), detData)
+          processDataBlock((rootFilePath, moduleName, f"Det_{channelNo+1:02}"), detData)
       if exportAddback and inCalFilePath is not None and moduleName in addbackChannelDict :
         for addbackNo, channels in addbackChannelDict[moduleName].items() :
           processAddbackDataBlock((rootFilePath, moduleName, f"Addback_{addbackNo}"), channels, moduleData.T[channels])
