@@ -122,7 +122,8 @@ os.makedirs(outDir, exist_ok=True)
 # Hardcoded settings
 mvmeModulesChannelsDict = {
   'clovers_up/amplitude[16]': range(16),
-  'clovers_down/amplitude[16]': [0, 1, 2, 3, 4, 5, 6, 7, 15],
+  'clovers_down/amplitude[16]': [0, 1, 2, 3, 4, 5, 6, 7],
+  'zero_degree/amplitude[16]': [15],
   'scintillators/integration_long[16]': range(14),
 }
 addbackChannelDict = {
@@ -220,7 +221,7 @@ uprootExecutor=uproot.ThreadPoolExecutor(num_workers=os.cpu_count())
 with uproot.open(rootFilePath, num_workers=os.cpu_count(), decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) as rootFile :
   totalEntries = rootFile['event0'].num_entries
   print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f"- {totalEntries:.2e} events to process.")
-  for moduleDictBlock in rootFile['event0'].iterate(tuple(mvmeModulesChannelsDict), library="np", decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) :
+  for moduleDictBlock in rootFile['event0'].iterate(tuple(mvmeModulesChannelsDict), library="np", decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor, step_size="50 MB") :
     for moduleName, moduleData in moduleDictBlock.items() :
       if exportRaw or exportCal:
         for channelNo in mvmeModulesChannelsDict[moduleName] :
