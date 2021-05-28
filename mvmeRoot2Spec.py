@@ -123,7 +123,7 @@ os.makedirs(outDir, exist_ok=True)
 mvmeModulesChannelsDict = {
   'clovers_up/amplitude[16]': range(16),
   'clovers_down/amplitude[16]': [0, 1, 2, 3, 4, 5, 6, 7],
-  'zero_degree/amplitude[16]': [15],
+  'clovers_sum/amplitude[16]': [15],
   'scintillators/integration_long[16]': range(14),
 }
 addbackChannelDict = {
