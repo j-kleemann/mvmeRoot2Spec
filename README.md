@@ -13,7 +13,7 @@ Specifically aimed at the mvme DAQ used since 2021 at the High Intensity γ-ray 
 
 ## Usage
 
-The `mvmeRoot2Spec.py` python script is provided to sort the events into spectra.
+The `mvmeRoot2Spec.py` python script/module is provided to sort the events into spectra.
 Execute
 
 ```bash
