@@ -101,6 +101,16 @@ def mvmeRoot2Spec(
   hists = dict()
   digitizerBins = 2**16
   calFilenameRegex = re.compile(fr"({rootFilePathToPrefix(rootFilePath)}_.+)_raw_b(\d+).txt:?")
+  # If stdout is a console (i.e. not redirection to file/pipe), assume it can handle ANSI escapes and use them to
+  # overwrite the previous line for progress/status outputs. Other possibility would be to use \r instead of \n
+  # as line end, as \r still causes a stdout flush, but positions the cursor at the beginning of the same line,
+  # causing the next print to overwrite each character one at a time
+  printProgF=printF
+  if sys.stdout.isatty() :
+    def printProgF(*args, **kw_args):
+      printF("\x1b[2K", end="") # ANSI escape to clear the current line
+      printF(*args, **kw_args)
+      printF("\x1b[1F", end="") # ANSI escape to move the cursor to the beginning of the previous line
 
   rawHistBinnings = [{
     "binWidth": rebinningFactor,
@@ -187,7 +197,7 @@ def mvmeRoot2Spec(
   with uproot.open(rootFilePath, num_workers=os.cpu_count(), decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) as rootFile :
     totalEntries = rootFile['event0'].num_entries
     printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f"- {totalEntries:.2e} events to process.")
-    for moduleDictBatch in rootFile['event0'].iterate(tuple(mvmeModulesChannelsDict), library="np", decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor, step_size="50 MB") :
+    for moduleDictBatch in rootFile['event0'].iterate(tuple(mvmeModulesChannelsDict), library="np", decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) : #, step_size="50 MB") :
       for moduleName, moduleData in moduleDictBatch.items() :
         if exportRaw or exportCal:
           for channelNo in mvmeModulesChannelsDict[moduleName] :
@@ -204,7 +214,9 @@ def mvmeRoot2Spec(
           nextProgressPercentage = round(processedEvents/totalEntries/nextProgressPercentageStepSize) * nextProgressPercentageStepSize + nextProgressPercentageStepSize
           nextProgressTime = now + datetime.timedelta(minutes=3)
           remainingSeconds = int((totalEntries/processedEvents - 1) * (now - startTime).total_seconds())
-          printF(now.strftime("%Y-%m-%d %H:%M:%S"), f"- Processed {processedEvents:.2e} events so far (≈{processedEvents/totalEntries:7.2%}) - ETA: {remainingSeconds//(60*60)}:{(remainingSeconds//60)%60:02}:{remainingSeconds%60:02} - Mean processing speed: {processedEvents/(now - startTime).total_seconds():.2e} events/s")
+          printProgF(now.strftime("%Y-%m-%d %H:%M:%S"), f"- Processed {processedEvents:.2e} events so far ({processedEvents/totalEntries:7.2%}) - ETA: {remainingSeconds//(60*60)}:{(remainingSeconds//60)%60:02}:{remainingSeconds%60:02} - Mean processing speed: {processedEvents/(now - startTime).total_seconds():.2e} events/s")
+    if printProgress and sys.stdout.isatty():
+      printF() # Print newline after continuosly updated progress line
 
   # Export histograms and a hdtv calibration file
   if len(hists) > 0 :
@@ -213,10 +225,12 @@ def mvmeRoot2Spec(
     with open(os.path.join(outDir, outCalFilePath) , "w" if outcalOverwrite else "a") as calOutputFile :
       for histName, hist in hists.items() :
         if verbose:
-          printF("Writing",histName,"...")
+          printProgF("Writing", histName, "...")
         outfilename = os.path.join(outDir, histName)
         np.savetxt(outfilename, hist["cts"], fmt="%d")
         calOutputFile.write(histName + ": " + str(hist["binning"]["binWidth"]/2+hist["binning"]["lowerEdge"]) + "   " + str(hist["binning"]["binWidth"]) + "\n")
+      if verbose and sys.stdout.isatty():
+        printF() # Print newline after continuosly updated progress line
   else:
     printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "- There were no spectra created! You might want to check your settings...?")
 
@@ -285,7 +299,7 @@ def mvmeRoot2SpecCLI(argv):
 
   elapsedSeconds = int((datetime.datetime.now()-startTime).total_seconds())
   print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"-", programName, f"has finished, took {elapsedSeconds//(60*60)}:{(elapsedSeconds//60)%60:02}:{elapsedSeconds%60:02}")
-  if cliArgs.verbose:
+  if not sys.stdout.isatty() :
     print(80*"#")
 
 
