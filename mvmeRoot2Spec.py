@@ -240,11 +240,20 @@ class Hist1D(DataAccumulator):
   @staticmethod
   def constructSimpleFillMethod(mod: MvmeModuleElement, channelNo: ChannelNo, cal: Optional[Calibration] = None) -> Callable[[Hist1D, MvmeDataBatch], None]:
     "BACKLOG."
-    # Don't filter for NaNs as boost histogram just puts them in the overflow-bin by convention: https://www.boost.org/doc/libs/1_77_0/libs/histogram/doc/html/histogram/rationale.html#histogram.rationale.uoflow
+    # Don't have to filter for NaNs as boost histogram just puts them in the overflow-bin by convention: https://www.boost.org/doc/libs/1_77_0/libs/histogram/doc/html/histogram/rationale.html#histogram.rationale.uoflow
+    # But apparently it's faster to do it oneself
     if cal is None:
-      return lambda hist1D, moduleDictBatch: hist1D.h.fill(moduleDictBatch[mod][:, channelNo])
+      def fillFunction(hist1D: Hist1D, moduleDictBatch: MvmeDataBatch) -> None:
+        data=moduleDictBatch[mod][:, channelNo]
+        hist1D.h.fill(data[~np.isnan(data)])
+      return fillFunction
+      # return lambda hist1D, moduleDictBatch: hist1D.h.fill(moduleDictBatch[mod][:, channelNo])
     else:
-      return lambda hist1D, moduleDictBatch: hist1D.h.fill(cal(moduleDictBatch[mod][:, channelNo]))
+      def fillFunction(hist1D: Hist1D, moduleDictBatch: MvmeDataBatch) -> None:
+        data=moduleDictBatch[mod][:, channelNo]
+        hist1D.h.fill(cal(data[~np.isnan(data)]))
+      return fillFunction
+      # return lambda hist1D, moduleDictBatch: hist1D.h.fill(cal(moduleDictBatch[mod][:, channelNo]))
 
   @classmethod
   def createHistNameStem(cls, prefix: str, mod: MvmeModuleElement, histType: str, histNo: ChannelNo) -> str:
@@ -287,12 +296,12 @@ class Hist1D(DataAccumulator):
     def fillFunction(hist1D: Hist1D, moduleDictBatch: MvmeDataBatch) -> None:
       "BACKLOG."
       # Need to first select relevant data, then apply individual cal to each of its rows, then convert NaNs to 0, sum the rows, drop 0s and finally fill
-      data: np.ndarray = moduleDictBatch[mod][:, channelNos]
-      addbackData = np.zeros(data.shape[0])
-      channelData: np.ndarray
-      for cal, channelData in zip(cals, data.T):
-        channelData = cal(channelData)
-        addbackData += np.nan_to_num(channelData)
+      # Or: Just extract the non-NaN data, calibrate and add it to a 0 initialized array
+      data: np.ndarray = moduleDictBatch[mod].T[channelNos]
+      addbackData = np.zeros(data.shape[1])
+      nonNanIndices=~np.isnan(data)
+      for i, cal in enumerate(cals):
+        addbackData[nonNanIndices[i]]+=cal(data[i, nonNanIndices[i]])
       hist1D.h.fill(addbackData[addbackData != 0])
 
     return cls(name, bSpec, fillFunction, True)
@@ -324,6 +333,12 @@ class Sorter:
           # coresponding channel values (back by 0.5 and shrinked by 1/rawRebinningFactor used) and then applying the HDTV calibration
           calRebinningFactor = int(regexMatch.group(2))
           cal = cal(np.polynomial.Polynomial([-0.5, 1 / calRebinningFactor]))
+          # def cal(data: np.ndarray):
+          #   "Apply calibration polynomial to data, but not on NaNs for faster processing."
+          #   dataCal=np.full(data.shape, np.nan) # Need a new array as assignments take place below
+          #   nonNanIndices=~np.isnan(data)
+          #   dataCal[nonNanIndices]=cal(data[nonNanIndices])
+          #   return dataCal
           self.calsDict[f"{self.cfg.outPrefix}_{regexMatch.group(1)}"] = cal
 
   def constructHistsFromCfg(self: Sorter) -> None: #TODO make this more tidy
