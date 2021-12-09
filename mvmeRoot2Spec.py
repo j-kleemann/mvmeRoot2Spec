@@ -23,6 +23,8 @@ Specifically aimed at the mvme DAQ used since 2021 at the High Intensity γ-ray 
 
 # BACKLOG Distribute among multiple source files?
 # BACKLOG Rename functions, variables etc
+# BACKLOG improve typing of custom types
+
 # TODO Implement 2D Hists
 
 from __future__ import annotations
@@ -116,6 +118,8 @@ class Config:
   exportCal: bool = True
   exportAddback: bool = True
   outcalOverwrite: bool = False
+  maxEntriesToProcess: int = -1
+  fractionOfEntriesToProcess: float = 1
   printF: updateablePrint = updateablePrint() # Must have keyword arg "updatable" in addition to usual print kw args
   mvmeModules: Optional[Iterable[MvmeModuleElement]] = None
   mvmeModulesDigitizerRangeDict: dict[MvmeModuleElement, int] = dataclasses.field(default_factory=lambda: {
@@ -147,6 +151,11 @@ class Config:
       self.outDir = self.outPrefix + "_sorted"
     if self.mvmeModules is None:
       self.mvmeModules = tuple(self.mvmeModulesChannelsDict)
+    if not isinstance(self.maxEntriesToProcess, int):
+      if isinstance(self.maxEntriesToProcess, float) and self.maxEntriesToProcess.is_integer():
+        self.maxEntriesToProcess = int(self.maxEntriesToProcess)
+      else:
+        raise ExplicitCheckFailedError("maxEntriesToProcess must be an integer!")
 
   @staticmethod
   def rootFilePathToPrefix(filePath: str) -> str:
@@ -243,15 +252,19 @@ class Hist1D(DataAccumulator):
     # Don't have to filter for NaNs as boost histogram just puts them in the overflow-bin by convention: https://www.boost.org/doc/libs/1_77_0/libs/histogram/doc/html/histogram/rationale.html#histogram.rationale.uoflow
     # But apparently it's faster to do it oneself
     if cal is None:
+
       def fillFunction(hist1D: Hist1D, moduleDictBatch: MvmeDataBatch) -> None:
-        data=moduleDictBatch[mod][:, channelNo]
+        data = moduleDictBatch[mod][:, channelNo]
         hist1D.h.fill(data[~np.isnan(data)])
+
       return fillFunction
       # return lambda hist1D, moduleDictBatch: hist1D.h.fill(moduleDictBatch[mod][:, channelNo])
     else:
+
       def fillFunction(hist1D: Hist1D, moduleDictBatch: MvmeDataBatch) -> None:
-        data=moduleDictBatch[mod][:, channelNo]
+        data = moduleDictBatch[mod][:, channelNo]
         hist1D.h.fill(cal(data[~np.isnan(data)]))
+
       return fillFunction
       # return lambda hist1D, moduleDictBatch: hist1D.h.fill(cal(moduleDictBatch[mod][:, channelNo]))
 
@@ -299,9 +312,9 @@ class Hist1D(DataAccumulator):
       # Or: Just extract the non-NaN data, calibrate and add it to a 0 initialized array
       data: np.ndarray = moduleDictBatch[mod].T[channelNos]
       addbackData = np.zeros(data.shape[1])
-      nonNanIndices=~np.isnan(data)
+      nonNanIndices = ~np.isnan(data)
       for i, cal in enumerate(cals):
-        addbackData[nonNanIndices[i]]+=cal(data[i, nonNanIndices[i]])
+        addbackData[nonNanIndices[i]] += cal(data[i, nonNanIndices[i]])
       hist1D.h.fill(addbackData[addbackData != 0])
 
     return cls(name, bSpec, fillFunction, True)
@@ -392,29 +405,42 @@ class Sorter:
 
   def iterateRoot(self: Sorter) -> None:
     "Iterate over a mvme root file, handing each data batch to self.processModuleDictBatch."
-    if self.cfg.printProgress:
-      processedEvents = 0
-      startTime = datetime.datetime.now()
-      nextProgressPercentage = 0
-      nextProgressPercentageStepSize = 0.05
-      nextProgressTime = startTime
     with self.openRoot() as rootFile:
       ev0: uproot.TBranch = rootFile['event0'] # Should actually be a TTree?
       totalEntries = ev0.num_entries
-      self.cfg.printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f"- {totalEntries:.2e} events to process.")
+      processedEntries = 0
+      entriesToProcess = totalEntries * self.cfg.fractionOfEntriesToProcess if self.cfg.maxEntriesToProcess < 0 or totalEntries * self.cfg.fractionOfEntriesToProcess < self.cfg.maxEntriesToProcess else self.cfg.maxEntriesToProcess
+      self.cfg.printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f'- {totalEntries:.2e} entries {f"on file of which {entriesToProcess:.2e} entries are" if entriesToProcess != totalEntries else ""} to process.')
       uprootExecutor = uproot.ThreadPoolExecutor(num_workers=os.cpu_count())
+      if self.cfg.printProgress:
+        startTime = datetime.datetime.now()
+        nextProgressPercentage = 0
+        nextProgressPercentageStepSize = 0.05
+        nextProgressTime = startTime
       moduleDictBatch: MvmeDataBatch
       for moduleDictBatch in ev0.iterate(tuple(self.cfg.mvmeModules), library="np", decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor): #, step_size="50 MB") :
+        # readEntries += next(iter(moduleDictBatch.values())).shape[0]
+        # if (processedEntries/readEntries) >= self.cfg.fractionOfEntriesToProcess :
+        #   continue
+        # for mod, batch in moduleDictBatch.items():
+        #   moduleDictBatch[mod]=batch[:math.ceil(self.cfg.fractionOfEntriesToProcess*len(batch))]
+        if self.cfg.fractionOfEntriesToProcess != 1:
+          moduleDictBatch = {mod: batch[:math.ceil(self.cfg.fractionOfEntriesToProcess * len(batch))] for mod, batch in moduleDictBatch.items()}
+        processedEntries += next(iter(moduleDictBatch.values())).shape[0]
+        if self.cfg.maxEntriesToProcess >= 0 and processedEntries >= self.cfg.maxEntriesToProcess:
+          moduleDictBatch = {mod: batch[:len(batch) - (processedEntries - self.cfg.maxEntriesToProcess)] for mod, batch in moduleDictBatch.items()}
+          self.cfg.printF(f"Breaking BACKLOG")
+          self.processModuleDictBatch(moduleDictBatch)
+          break
         self.processModuleDictBatch(moduleDictBatch)
         # BACKLOG Implement break early (breakAfter)
         if self.cfg.printProgress:
-          processedEvents += next(iter(moduleDictBatch.values())).shape[0]
           now = datetime.datetime.now()
-          if processedEvents / totalEntries >= nextProgressPercentage or now >= nextProgressTime:
-            nextProgressPercentage = round(processedEvents / totalEntries / nextProgressPercentageStepSize) * nextProgressPercentageStepSize + nextProgressPercentageStepSize
+          if processedEntries / entriesToProcess >= nextProgressPercentage or now >= nextProgressTime or processedEntries == entriesToProcess:
+            nextProgressPercentage = round(processedEntries / entriesToProcess / nextProgressPercentageStepSize) * nextProgressPercentageStepSize + nextProgressPercentageStepSize
             nextProgressTime = now + datetime.timedelta(minutes=3)
-            remainingSeconds = int((totalEntries / processedEvents - 1) * (now - startTime).total_seconds())
-            self.cfg.printF(now.strftime("%Y-%m-%d %H:%M:%S"), f"- Processed {processedEvents:.2e} events so far ({processedEvents/totalEntries:7.2%}) - ETA: {remainingSeconds//(60*60)}:{(remainingSeconds//60)%60:02}:{remainingSeconds%60:02} - Mean processing speed: {processedEvents/(now - startTime).total_seconds():.2e} events/s", updatable=True)
+            remainingSeconds = int((entriesToProcess / processedEntries - 1) * (now - startTime).total_seconds())
+            self.cfg.printF(now.strftime("%Y-%m-%d %H:%M:%S"), f"- Processed {processedEntries:.2e} entries so far ({processedEntries/totalEntries:7.2%}) - ETA: {remainingSeconds//(60*60)}:{(remainingSeconds//60)%60:02}:{remainingSeconds%60:02} - Mean processing speed: {processedEntries/(now - startTime).total_seconds():.2e} entries/s", updatable=True)
       self.cfg.printF.makeLastLineUnUpdatable() # Make updateable line un-updateable (if any), i.e. leaving info about speed intact, even if any updatable prints follow
 
   def exportSpectra(self: Sorter):
