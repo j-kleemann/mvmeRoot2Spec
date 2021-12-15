@@ -25,28 +25,31 @@ Specifically aimed at the mvme DAQ used since 2021 at the High Intensity γ-ray 
 # BACKLOG Rename functions, variables etc
 # BACKLOG improve typing of custom types
 
-# TODO Implement 2D Hists
+# TODO Implement 2D Hist Export
 
 from __future__ import annotations
+import abc
 import sys
 import os
 import math
 import datetime
 import argparse
-from typing import Any, Callable, ClassVar, Iterable, NewType, Optional, TextIO, Union
+from typing import Any, Callable, ClassVar, Iterable, Iterator, Sequence, Literal, NewType, Optional, TextIO, Tuple, Union
 import dataclasses
-from contextlib import contextmanager
+import contextlib
 from itertools import repeat
 import re
+import concurrent.futures
 import numpy as np
 import uproot
 import hist
 
 MvmeModuleElement = NewType("MvmeModuleElement", str) # e.g. "clovers/amplitude[16]"
-MvmeDataBatch = "dict[MvmeModuleElement, np.ndarray]" # Shape of batch: (batchSize, channels)
+MvmeDataBatch = dict[MvmeModuleElement, np.ndarray] # Shape of batch: (batchSize, channels)
 ChannelNo = NewType("ChannelNo", int)
-ChannelsDict = "dict[MvmeModuleElement, Iterable[ChannelNo]]"
-Calibration = Callable[[np.ndarray], np.ndarray] # Calibrations need to preserve NaNs for addback (and to not increment the 0 bin of calibrated histograms)!
+ChannelsDict = dict[MvmeModuleElement, Sequence[ChannelNo]]
+Calibration = Union[Callable[[np.ndarray], np.ndarray], "TupleCalibration", tuple[float, ...]]
+CalibDict = dict[str, Calibration]
 
 
 class ExplicitCheckFailedError(Exception):
@@ -57,6 +60,21 @@ class ExplicitCheckFailedError(Exception):
 class NoCalibrationFoundError(ExplicitCheckFailedError):
   "Exception raised when no calibration is found for construction of a calibrated histogram."
   pass
+
+
+def iterateAhead(iterator: Iterable) -> Iterator[Any]:
+  "BACKLOG."
+
+  class StopIterationSentinel:
+    "BACKLOG."
+
+  iterator = iter(iterator) # If already an Iterator this should have no effect (every Iterator should also be an Iterable)
+  nextVal = next(iterator)
+  with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    while nextVal is not StopIterationSentinel:
+      future = executor.submit(next, iterator, StopIterationSentinel)
+      yield nextVal
+      nextVal = future.result()
 
 
 class updateablePrint:
@@ -111,19 +129,23 @@ class Config:
   ignoreNoCalibrationFoundError: bool = True
   outCalFilePath: Optional[str] = None
   rawHistRebinningFactors: list[int] = (1, )
-  calHistBinningSpecs: list[tuple[float, float]] = ((1., 20e3), )
+  calHistBinningSpecs: list[tuple[float, float]] = ((1, 20e3), )
   verbose: bool = False
   printProgress: bool = False
   exportRaw: bool = True
   exportCal: bool = True
   exportAddback: bool = True
-  disableExport: bool = False
+  disableExport: bool = True
   outcalOverwrite: bool = False
-  uprootIterateStepSize: Union[str, int] = "100MB"
+  uprootIterateStepSize: Union[str, int] = "800MB"
+  uprootThreads: Optional[int] = min(16, os.cpu_count())
+  histFillThreads: Optional[int] = min(8, os.cpu_count())
   maxEntriesToProcess: int = -1
   fractionOfEntriesToProcess: float = 1
+  progressFractionThresholdStepSize: float = 0.05
+  progressTimeThresholdStepSizeInMinutes: float = 0 if sys.stdout.isatty() else 3
   printF: updateablePrint = updateablePrint() # Must have keyword arg "updatable" in addition to usual print kw args
-  mvmeModules: Optional[Iterable[MvmeModuleElement]] = None
+  mvmeModules: Optional[Sequence[MvmeModuleElement]] = None
   mvmeModulesDigitizerRangeDict: dict[MvmeModuleElement, int] = dataclasses.field(default_factory=lambda: {
     'clovers_up/amplitude[16]': 2**16,
     'clovers_down/amplitude[16]': 2**16,
@@ -133,12 +155,12 @@ class Config:
   mvmeModulesChannelsDict: ChannelsDict = dataclasses.field(default_factory=lambda: {
     'clovers_up/amplitude[16]': range(16),
     'clovers_down/amplitude[16]': [0, 1, 2, 3, 4, 5, 6, 7],
-    'clovers_sum/amplitude[16]': [15],
+    # 'clovers_sum/amplitude[16]': [15], # TODO Reinclude
     'scintillators/integration_long[16]': range(14),
   })
-  addbackChannelsDict: dict[MvmeModuleElement, dict[int, Iterable[ChannelNo]]] = dataclasses.field(default_factory=lambda: {
-    'clovers_up/amplitude[16]': {1: [0, 1, 2, 3], 2: [4, 5, 6, 7], 3: [8, 9, 10, 11], 4: [12, 13, 14, 15]},
-    'clovers_down/amplitude[16]': {1: [0, 1, 2, 3], 2: [4, 5, 6, 7], 3: [8, 9, 10, 11], 4: [12, 13, 14, 15]},
+  addbackChannelsDict: dict[MvmeModuleElement, dict[int, tuple[ChannelNo, ...]]] = dataclasses.field(default_factory=lambda: {
+    'clovers_up/amplitude[16]': {1: (0, 1, 2, 3), 2: (4, 5, 6, 7), 3: (8, 9, 10, 11), 4: (12, 13, 14, 15)},
+    'clovers_down/amplitude[16]': {1: (0, 1, 2, 3), 2: (4, 5, 6, 7), 3: (8, 9, 10, 11), 4: (12, 13, 14, 15)},
   })
 
   def __post_init__(self) -> None:
@@ -210,16 +232,113 @@ class BinningSpec():
     return f"{self.binWidth/2+self.lowerEdge}   {self.binWidth}"
 
 
+class TupleCalibration(tuple):
+  "BACKLOG."
+
+  def __repr__(self) -> str:
+    return f"{type(self).__name__}({super().__repr__()})"
+
+  def __call__(self, data: np.ndarray) -> np.ndarray:
+    "BACKLOG."
+    result = np.full(data.shape, self[-1]) # Use Horner's method
+    for coefficient in self[-2::-1]: # All elements but the last of self in reversed order
+      result = result * data + coefficient
+    return result
+
+
+class ScaleCalibration(TupleCalibration):
+  "BACKLOG."
+
+  def __new__(cls, scalingFactor: float) -> ScaleCalibration:
+    "BACKLOG."
+    return super().__new__(cls, (0, scalingFactor))
+
+  def __repr__(self) -> str:
+    return f"{type(self).__name__}({self[1]})"
+
+  def __call__(self, data: np.ndarray) -> np.ndarray:
+    "BACKLOG."
+    return data * self[1]
+
+  @property
+  def scalingFactor(self) -> float:
+    "BACKLOG."
+    return self[1]
+
+
 @dataclasses.dataclass
-class DataAccumulator():
+class LazyCachedAugmentedModuleBatch():
+  "BACKLOG."
+  data: dict[tuple[MvmeModuleElement, Union[ChannelNo, tuple[ChannelNo, ...]], Union[Literal["NonNaNMask"], tuple[float, ...], tuple[tuple[float, ...], ...]]], np.ndarray]
+  calibDict: dict[tuple[MvmeModuleElement, Union[ChannelNo, tuple[ChannelNo, ...]], Union[Literal["NonNaNMask"], tuple[float, ...], tuple[tuple[float, ...], ...]]], np.ndarray] = dataclasses.field(default_factory=dict)
+
+  def __getitem__(self, key: Union[MvmeModuleElement, tuple[MvmeModuleElement, Union[ChannelNo, tuple[ChannelNo, ...]], Union[Literal[True, False, "NonNaNMask"], CalibDict, Calibration, tuple[Calibration, ...]]]]) -> np.ndarray:
+    "BACKLOG"
+    if isinstance(key, tuple):
+      return self.getLazy(*key)
+    return self.getLazy(key)
+
+  def getLazy(self, mod: MvmeModuleElement, channelNoOrNos: Union[ChannelNo, tuple[ChannelNo, ...]] = 0, cal: Union[Literal[True, False, "NonNaNMask"], CalibDict, Calibration, tuple[Calibration, ...]] = False) -> np.ndarray:
+    "BACKLOG."
+    # Don't have to filter for NaNs as boost histogram just puts them in the overflow-bin by convention: https://www.boost.org/doc/libs/1_77_0/libs/histogram/doc/html/histogram/rationale.html#histogram.rationale.uoflow
+    if cal is False:
+      return self.data[mod][:, channelNoOrNos]
+    if cal is True:
+      cal = self.calibDict
+    if not isinstance(channelNoOrNos, tuple): # Single channel data is requested
+      if isinstance(cal, dict):
+        cal = DataAccumulatorBase.findCalib(mod, channelNoOrNos, cal)
+      if not (isinstance(cal, str) or callable(cal)):
+        cal = TupleCalibration(cal)
+      cacheable = (cal == "NonNaNMask" or isinstance(cal, TupleCalibration))
+      if cacheable:
+        with contextlib.suppress(KeyError):
+          return self.data[(mod, channelNoOrNos, cal)]
+      if cal == "NonNaNMask":
+        returnV = ~np.isnan(self.data[mod][:, channelNoOrNos])
+      else: # Calibrated data is requested
+        data: np.ndarray = self.data[mod][:, channelNoOrNos]
+        returnV = np.full(data.shape, np.nan)
+        nonNaNMask = self.getLazy(mod, channelNoOrNos, "NonNaNMask")
+        returnV[nonNaNMask] = cal(data[nonNaNMask])
+    else: # Addback data/NonNaNMask are requested
+      if isinstance(cal, dict):
+        cal = tuple(DataAccumulatorBase.findCalib(mod, chNo, cal) for chNo in channelNoOrNos)
+      if not isinstance(cal, str):
+        cal = tuple(TupleCalibration(c) if not callable(cal) else c for c in cal)
+      cacheable = (cal == "NonNaNMask" or all(isinstance(c, TupleCalibration) for c in cal))
+      if cacheable:
+        with contextlib.suppress(KeyError):
+          return self.data[(mod, channelNoOrNos, cal)]
+      if cal == "NonNaNMask":
+        returnV = np.any([self.getLazy(mod, ch, "NonNaNMask") for ch in channelNoOrNos], axis=0)
+      else: # Plain addback data is requested
+        returnV = np.full(self.getLazy(mod, channelNoOrNos[0], cal[0]).shape, np.nan)
+        returnV[self.getLazy(mod, channelNoOrNos, "NonNaNMask")] = 0
+        for ch, c in zip(channelNoOrNos, cal):
+          nonNaNMask = self.getLazy(mod, ch, "NonNaNMask")
+          returnV[nonNaNMask] += self.getLazy(mod, ch, c)[nonNaNMask]
+    if cacheable:
+      self.data[(mod, channelNoOrNos, cal)] = returnV
+    return returnV
+
+
+@dataclasses.dataclass
+class DataAccumulatorBase(abc.ABC):
   "BACKLOG"
   name: str
-  fillFunction: Callable[[DataAccumulator, MvmeDataBatch], None]
   detNoFormat: ClassVar[str] = "02"
+  timeCalibrations: ClassVar[dict[str, Calibration]] = {prop: ScaleCalibration(25 / 1024) for prop in ("trigger_time[2]", "channel_time[16]")} # 25 / 1024 was the used MDPP-16 TDC resolution, see also tdc_resolution in https://www.mesytec.com/products/datasheets/MDPP-16_SCP-RCP.pdf
 
+  @abc.abstractmethod
+  def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
+    "BACKLOG."
+    ...
+
+  @abc.abstractmethod
   def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
     "BACKLOG."
-    pass
+    ...
 
   @classmethod
   def createHistNamePart(cls, mod: MvmeModuleElement, label: str = "Det", channelNo: ChannelNo = 0, channelNoOffset: int = 1) -> str:
@@ -236,31 +355,52 @@ class DataAccumulator():
     return f'{mod}_{prop}_{label}_{channelNo+channelNoOffset:{cls.detNoFormat}}'
 
   @classmethod
-  def findCalib(cls, prefix: str, mod: MvmeModuleElement, channelNo: ChannelNo, calsDict: dict[str, Calibration]) -> Calibration:
+  def findCalib(cls, mod: MvmeModuleElement, channelNo: ChannelNo, calibDict: CalibDict) -> Calibration:
     "BACKLOG."
-    cal = calsDict.get(f'{prefix}_{cls.createHistNamePart(mod, "Det", channelNo)}', None)
-    if cal is None:
-      raise NoCalibrationFoundError(f'No calib for {prefix}_{cls.createHistNamePart(mod, "Det", channelNo)} BACKLOG')
-    if not callable(cal):
-      raise ExplicitCheckFailedError("Calib not callable BACKLOG")
-    return cal
-
-  def processModuleDictBatch(self, data: MvmeDataBatch) -> None:
-    "BACKLOG."
-    self.fillFunction(self, data)
+    cal = calibDict.get(cls.createHistNamePart(mod, "Det", channelNo), None)
+    if cal is not None:
+      if not (isinstance(cal, tuple) or callable(cal)):
+        raise ExplicitCheckFailedError("Calib not callable or poly coeffs BACKLOG")
+      return cal
+    for prop, cal in cls.timeCalibrations.items():
+      if mod.endswith(prop):
+        if not (isinstance(cal, tuple) or callable(cal)):
+          raise ExplicitCheckFailedError("Calib not callable or poly coeffs BACKLOG")
+        return cal
+    raise NoCalibrationFoundError(f'No calib for {cls.createHistNamePart(mod, "Det", channelNo)} BACKLOG')
 
 
 @dataclasses.dataclass
-class Hist1D(DataAccumulator):
+class DataAccumulator(DataAccumulatorBase):
+  "BACKLOG"
+  name: str
+  dataProcessor: Callable[[DataAccumulatorBase, LazyCachedAugmentedModuleBatch], None]
+
+  def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
+    "BACKLOG."
+    self.dataProcessor(self, data)
+
+  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
+    "BACKLOG."
+    pass
+
+
+@dataclasses.dataclass
+class Hist1D(DataAccumulatorBase):
   "BACKLOG."
   name: str
-  fillFunction: Callable[[Hist1D, MvmeDataBatch], None]
   binningSpec: BinningSpec
+  dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], np.ndarray]
+  fillThreads: Optional[int] = Config.histFillThreads
   h: hist.Hist = dataclasses.field(init=False)
 
   def __post_init__(self) -> None:
     "Called by __init__() generated by dataclasses.dataclass. Here used to initialize underlying hist.Hist object using other fields."
-    self.h = hist.Hist.new.Regular(**self.binningSpec.asHistAxisKW(), flow=False).Int64()
+    self.h = hist.Hist.new.Regular(**self.binningSpec.asHistAxisKW(), flow=False).AtomicInt64()
+
+  def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
+    "BACKLOG."
+    self.h.fill(self.dataProcessor(data), threads=self.fillThreads)
 
   def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
     "BACKLOG."
@@ -278,125 +418,32 @@ class Hist1D(DataAccumulator):
     "BACKLOG."
     return f'{prefix}_{cls.createHistNamePart(mod, label, channelNo, channelNoOffset)}_{"cal" if cal else "raw"}_b{binWidth}'
 
-  @staticmethod
-  def constructSimpleFillMethod(mod: MvmeModuleElement, channelNo: ChannelNo, cal: Optional[Calibration] = None) -> Callable[[Hist1D, MvmeDataBatch], None]:
-    "BACKLOG."
-    # Don't have to filter for NaNs as boost histogram just puts them in the overflow-bin by convention: https://www.boost.org/doc/libs/1_77_0/libs/histogram/doc/html/histogram/rationale.html#histogram.rationale.uoflow
-    # But apparently it's faster to do it oneself
-    if cal is None:
-
-      def fillFunction(hist1D: Hist1D, moduleDictBatch: MvmeDataBatch) -> None:
-        data = moduleDictBatch[mod][:, channelNo]
-        hist1D.h.fill(data[~np.isnan(data)])
-
-      return fillFunction
-      # return lambda hist1D, moduleDictBatch: hist1D.h.fill(moduleDictBatch[mod][:, channelNo])
-    else:
-
-      def fillFunction(hist1D: Hist1D, moduleDictBatch: MvmeDataBatch) -> None:
-        data = moduleDictBatch[mod][:, channelNo]
-        hist1D.h.fill(cal(data[~np.isnan(data)]))
-
-      return fillFunction
-      # return lambda hist1D, moduleDictBatch: hist1D.h.fill(cal(moduleDictBatch[mod][:, channelNo]))
-
   @classmethod
-  def constructSimpleHist1D(cls, prefix: str, mod: MvmeModuleElement, channelNo: ChannelNo, bSpec: BinningSpec, cal: Union[None, dict[str, Calibration], Calibration] = None) -> Hist1D:
+  def constructSimpleHist1D(cls, prefix: str, mod: MvmeModuleElement, channelNo: ChannelNo, bSpec: BinningSpec, cal: Union[Literal[False], CalibDict, Calibration] = False) -> Hist1D:
     "BACKLOG."
     name = cls.createHistName(prefix, mod, "Det", channelNo, cal is not None, bSpec.binWidth)
     if isinstance(cal, dict):
-      cal = cls.findCalib(prefix, mod, channelNo, cal)
-    fillF = cls.constructSimpleFillMethod(mod, channelNo, cal)
-    return cls(name, fillF, bSpec)
+      cal = cls.findCalib(mod, channelNo, cal)
+    return cls(name, bSpec, lambda data: data.getLazy(mod, channelNo, cal)[data.getLazy(mod, channelNo, "NonNaNMask")])
 
   @classmethod
-  def constructAddbackHist1D(cls, prefix: str, mod: MvmeModuleElement, addbackNo: int, channelNos: Iterable[ChannelNo], bSpec: BinningSpec, cals: Union[dict[str, Calibration], Iterable[Calibration]]) -> Hist1D:
+  def constructAddbackHist1D(cls, prefix: str, mod: MvmeModuleElement, addbackNo: int, channelNos: tuple[ChannelNo, ...], bSpec: BinningSpec, cals: Union[CalibDict, tuple[Calibration, ...]]) -> Hist1D:
     "BACKLOG."
     name = cls.createHistName(prefix, mod, "Addback", addbackNo, True, bSpec.binWidth, channelNoOffset=0)
     if isinstance(cals, dict):
-      cals = [cls.findCalib(prefix, mod, channelNo, cals) for channelNo in channelNos]
+      cals = tuple(cls.findCalib(mod, channelNo, cals) for channelNo in channelNos)
     if len(cals) != len(channelNos):
       raise ExplicitCheckFailedError("BACKLOG")
-
-    def fillFunction(hist1D: Hist1D, moduleDictBatch: MvmeDataBatch) -> None:
-      "BACKLOG."
-      # Need to first select relevant data, then apply individual cal to each of its rows, then convert NaNs to 0, sum the rows, drop 0s and finally fill
-      # Or: Just extract the non-NaN data, calibrate and add it to a 0 initialized array
-      data: np.ndarray = moduleDictBatch[mod].T[channelNos]
-      addbackData = np.zeros(data.shape[1])
-      nonNanIndices = ~np.isnan(data)
-      for i, cal in enumerate(cals):
-        addbackData[nonNanIndices[i]] += cal(data[i, nonNanIndices[i]])
-      hist1D.h.fill(addbackData[addbackData != 0])
-
-    return cls(name, fillFunction, bSpec)
+    return cls(name, bSpec, lambda data: data.getLazy(mod, channelNos, cals)[data.getLazy(mod, channelNos, "NonNaNMask")])
 
 
 @dataclasses.dataclass
-class Hist2D(DataAccumulator):
+class HistND(DataAccumulatorBase):
   "BACKLOG."
   name: str
-  fillFunction: Callable[[Hist2D, MvmeDataBatch], None]
-  binningSpecX: BinningSpec
-  binningSpecY: BinningSpec
-  h: hist.Hist = dataclasses.field(init=False)
-
-  def __post_init__(self) -> None:
-    "Called by __init__() generated by dataclasses.dataclass. Here used to initialize underlying hist.Hist object using other fields."
-    self.h = hist.Hist.new.Regular(**self.binningSpecX.asHistAxisKW(), flow=False).Regular(**self.binningSpecY.asHistAxisKW(), flow=False).Int64()
-
-  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
-    "BACKLOG."
-    # if printF is not None:
-    #   printF("Writing", self.name, "...", updatable=True)
-    # outFilePath = os.path.join(outDir, self.name + ".txt")
-    # # np.savetxt(outFilePath, self.h.counts(), fmt="%d", newline="\n")
-    # with open(outFilePath, "w", newline="\n") as f: # np.savetxt does not allow to force LF lineending on Windows
-    #   f.writelines(str(elem) + "\n" for elem in self.h.counts())
-    # if calOutputFile is not None:
-    #   calOutputFile.write(f"{self.name}.txt: {self.binningSpec.getHDTVCalibrationStr()}\n")
-
-  @classmethod
-  def createHistName(cls, prefix: str, modX: MvmeModuleElement, labelX: str, channelNoX: ChannelNo, calX: bool, binWidthX: float, modY: MvmeModuleElement, labelY: str, channelNoY: ChannelNo, calY: bool, binWidthY: float) -> str:
-    "BACKLOG."
-    return f'{prefix}_{cls.createHistNamePart(modX, labelX, channelNoX)}_{"cal" if calX else "raw"}_b{binWidthX}_VS_{cls.createHistNamePart(modY, labelY, channelNoY)}_{"cal" if calY else "raw"}_b{binWidthY}'
-
-  @staticmethod
-  def constructSimpleFillMethod(modX: MvmeModuleElement, channelNoX: ChannelNo, calX: Optional[Calibration], modY: MvmeModuleElement, channelNoY: ChannelNo, calY: Optional[Calibration]) -> Callable[[Hist2D, MvmeDataBatch], None]:
-    "BACKLOG."
-
-    def fillFunction(hist2D: Hist2D, moduleDictBatch: MvmeDataBatch) -> None:
-      dataX = moduleDictBatch[modX][:, channelNoX]
-      dataY = moduleDictBatch[modY][:, channelNoY]
-      nonNanIndices = ~np.logical_or(np.isnan(dataX), np.isnan(dataY))
-      dataX = dataX[nonNanIndices]
-      dataY = dataY[nonNanIndices]
-      if calX is not None:
-        dataX = calX(dataX)
-      if calY is not None:
-        dataY = calY(dataY)
-      hist2D.h.fill(dataX, dataY)
-
-    return fillFunction
-
-  @classmethod
-  def constructSimpleHist2D(cls, prefix: str, modX: MvmeModuleElement, channelNoX: ChannelNo, bSpecX: BinningSpec, calX: Union[None, dict[str, Calibration], Calibration], modY: MvmeModuleElement, channelNoY: ChannelNo, bSpecY: BinningSpec, calY: Union[None, dict[str, Calibration], Calibration]) -> Hist2D:
-    "BACKLOG."
-    name = cls.createHistName(prefix, modX, "Det", channelNoX, calX, bSpecX.binWidth, modY, "Det", channelNoY, calY, bSpecY.binWidth)
-    if isinstance(calX, dict):
-      calX = cls.findCalib(prefix, modX, channelNoX, calX)
-    if isinstance(calX, dict):
-      calY = cls.findCalib(prefix, modY, channelNoY, calY)
-    fillF = cls.constructSimpleFillMethod(modX, channelNoX, calX, modY, channelNoY, calY)
-    return cls(name, fillF, bSpecX, bSpecY)
-
-
-@dataclasses.dataclass
-class HistND(DataAccumulator):
-  "BACKLOG."
-  name: str
-  fillFunction: Callable[[HistND, MvmeDataBatch], None]
-  binningSpecs: Iterable[BinningSpec]
+  binningSpecs: Sequence[BinningSpec]
+  dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], Iterable[np.ndarray]]
+  fillThreads: Optional[int] = Config.histFillThreads
   dim: int = dataclasses.field(init=False)
   h: hist.Hist = dataclasses.field(init=False)
 
@@ -406,53 +453,115 @@ class HistND(DataAccumulator):
     h = hist.Hist.new
     for binningSpec in self.binningSpecs:
       h = h.Regular(**binningSpec.asHistAxisKW(), flow=False)
-    self.h = h.Int64()
+    self.h = h.AtomicInt64()
+
+  def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
+    "BACKLOG."
+    self.h.fill(*self.dataProcessor(data), threads=self.fillThreads)
 
   def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
     "BACKLOG."
-    pass
 
   @classmethod
   def createHistName(cls, prefix: str, mods: Iterable[MvmeModuleElement], labels: Iterable[str], channelNos: Iterable[ChannelNo], cals: Iterable[bool], binWidths: Iterable[float]) -> str:
     "BACKLOG."
     return prefix + "_VS_".join(f'{cls.createHistNamePart(mod, label, channelNo)}_{"cal" if cal else "raw"}_b{binWidth}' for mod, label, channelNo, cal, binWidth in zip(mods, labels, channelNos, cals, binWidths))
 
-  @staticmethod
-  def constructSimpleFillMethod(mods: Iterable[MvmeModuleElement], channelNos: Iterable[ChannelNo], cals: Iterable[Optional[Calibration]] = None) -> Callable[[HistND, MvmeDataBatch], None]:
-    "BACKLOG."
-    if cals is None:
-      cals = repeat(None)
-
-    def fillFunction(nistND: HistND, moduleDictBatch: MvmeDataBatch) -> None:
-      data = np.array([moduleDictBatch[mod][:, channelNo] for mod, channelNo in zip(mods, channelNos)])
-      nonNanIndices = ~np.any(np.isnan(data), axis=0)
-      nistND.h.fill(*(cal(d) if cal is not None else d for d, cal in zip(data[:, nonNanIndices], cals)))
-
-    return fillFunction
+  __createHistName = createHistName # Use name mangling to get a private copy of the original function (used by constructSimpleHistND) in case a subclass overwrites it (e.g. Hist2D does that)
 
   @classmethod
-  def constructSimpleHistND(cls, prefix: str, mods: Iterable[MvmeModuleElement], channelNos: Iterable[ChannelNo], bSpecs: Iterable[BinningSpec], cals: Iterable[Union[None, dict[str, Calibration], Calibration]] = None) -> HistND:
+  def constructSimpleHistND(cls, prefix: str, mods: Sequence[MvmeModuleElement], channelNos: Sequence[ChannelNo], bSpecs: Sequence[BinningSpec], cals: Union[Literal[False], CalibDict, Sequence[Union[Literal[False], CalibDict, Calibration]]] = False) -> HistND:
     "BACKLOG."
-    if cals is None:
-      cals = repeat(None)
-    else:
-      cals = [cls.findCalib(prefix, mod, channelNo, cal) if isinstance(cal, dict) else cal for mod, channelNo, cal in zip(mods, channelNos, cals)]
-    name = cls.createHistName(prefix, mods, repeat("Dets"), channelNos, cals, (bs.binWidth for bs in bSpecs))
-    fillF = cls.constructSimpleFillMethod(mods, channelNos, cals)
-    return cls(name, fillF, bSpecs)
+    if cals is False or isinstance(cals, dict):
+      cals = repeat(cals)
+    cals = [cls.findCalib(mod, channelNo, cal) if isinstance(cal, dict) else cal for mod, channelNo, cal in zip(mods, channelNos, cals)]
+    name = cls.__createHistName(prefix, mods, repeat("Dets"), channelNos, cals, (bs.binWidth for bs in bSpecs))
+    return cls(name, bSpecs, lambda data: tuple(data.getLazy(mod, channelNo, cal) for mod, channelNo, cal in zip(mods, channelNos, cals)))
+
+
+@dataclasses.dataclass
+class Hist2D(HistND):
+  "BACKLOG."
+  name: str
+  dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], Tuple[np.ndarray, np.ndarray]]
+  dim: int = dataclasses.field(init=False, repr=False)
+
+  def __init__(self, name: str, binningSpecsXandY: tuple[BinningSpec, BinningSpec], dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], Tuple[np.ndarray, np.ndarray]]) -> None:
+    "BACKLOG."
+    if len(binningSpecsXandY) != 2:
+      raise ExplicitCheckFailedError("BACKLOG.")
+    return super().__init__(name, binningSpecsXandY, dataProcessor)
+
+  @property
+  def binningSpecX(self) -> BinningSpec:
+    return self.binningSpecs[0]
+
+  @property
+  def binningSpecY(self) -> BinningSpec:
+    return self.binningSpecs[1]
+
+  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
+    "BACKLOG."
+
+  @classmethod
+  def createHistName(cls, prefix: str, modX: MvmeModuleElement, labelX: str, channelNoX: ChannelNo, calX: bool, binWidthX: float, modY: MvmeModuleElement, labelY: str, channelNoY: ChannelNo, calY: bool, binWidthY: float) -> str:
+    "BACKLOG."
+    return super().createHistName(prefix, (modX, modY), (labelX, labelY), (channelNoX, channelNoY), (calX, calY), (binWidthX, binWidthY))
+
+  @classmethod
+  def constructSimpleHist2D(cls, prefix: str, modX: MvmeModuleElement, channelNoX: ChannelNo, bSpecX: BinningSpec, calX: Union[None, CalibDict, Calibration], modY: MvmeModuleElement, channelNoY: ChannelNo, bSpecY: BinningSpec, calY: Union[None, CalibDict, Calibration]) -> Hist2D:
+    "BACKLOG."
+    return super().constructSimpleHistND(prefix, (modX, modY), (channelNoX, channelNoY), (bSpecX, bSpecY), (calX, calY))
+
+
+# @dataclasses.dataclass
+# class Hist2D(DataAccumulatorBase):
+#   "BACKLOG."
+#   name: str
+#   binningSpecX: BinningSpec
+#   binningSpecY: BinningSpec
+#   dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], Tuple[np.ndarray, np.ndarray]]
+#   fillThreads: Optional[int] = Config.histFillThreads
+#   h: hist.Hist = dataclasses.field(init=False)
+
+#   def __post_init__(self) -> None:
+#     "Called by __init__() generated by dataclasses.dataclass. Here used to initialize underlying hist.Hist object using other fields."
+#     self.h = hist.Hist.new.Regular(**self.binningSpecX.asHistAxisKW(), flow=False).Regular(**self.binningSpecY.asHistAxisKW(), flow=False).AtomicInt64()
+
+#   def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
+#     "BACKLOG."
+#     self.h.fill(*self.dataProcessor(data), threads=self.fillThreads)
+
+#   def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
+#     "BACKLOG."
+
+#   @classmethod
+#   def createHistName(cls, prefix: str, modX: MvmeModuleElement, labelX: str, channelNoX: ChannelNo, calX: bool, binWidthX: float, modY: MvmeModuleElement, labelY: str, channelNoY: ChannelNo, calY: bool, binWidthY: float) -> str:
+#     "BACKLOG."
+#     return f'{prefix}_{cls.createHistNamePart(modX, labelX, channelNoX)}_{"cal" if calX else "raw"}_b{binWidthX}_VS_{cls.createHistNamePart(modY, labelY, channelNoY)}_{"cal" if calY else "raw"}_b{binWidthY}'
+
+#   @classmethod
+#   def constructSimpleHist2D(cls, prefix: str, modX: MvmeModuleElement, channelNoX: ChannelNo, bSpecX: BinningSpec, calX: Union[Literal[False], CalibDict, Calibration], modY: MvmeModuleElement, channelNoY: ChannelNo, bSpecY: BinningSpec, calY: Union[Literal[False], CalibDict, Calibration]) -> Hist2D:
+#     "BACKLOG."
+#     name = cls.createHistName(prefix, modX, "Det", channelNoX, calX, bSpecX.binWidth, modY, "Det", channelNoY, calY, bSpecY.binWidth)
+#     if isinstance(calX, dict):
+#       calX = cls.findCalib(modX, channelNoX, calX)
+#     if isinstance(calY, dict):
+#       calY = cls.findCalib(modY, channelNoY, calY)
+#     return cls(name, bSpecX, bSpecY, lambda data: (getLazy(modX, channelNoX, calX), getLazy(modY, channelNoY, calY)))
 
 
 @dataclasses.dataclass
 class Sorter:
   "Instances process mvme ROOT files to spectra and store the (intermediate) results."
   cfg: Config
-  hists: list[DataAccumulator] = dataclasses.field(default_factory=list)
-  calsDict: dict[str, Calibration] = dataclasses.field(default_factory=dict, init=False)
+  hists: list[DataAccumulatorBase] = dataclasses.field(default_factory=list)
+  calibDict: CalibDict = dataclasses.field(default_factory=dict, init=False)
 
   # hists: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict, init=False)
 
   def parseCal(self: Sorter) -> None:
-    "Parse calibration file specified in self.cfg and store relevant found calibrations in self.calsDict."
+    "Parse calibration file specified in self.cfg and store relevant found calibrations in self.calibDict."
     if self.cfg.inCalFilePath is None or not os.path.isfile(self.cfg.inCalFilePath):
       raise ExplicitCheckFailedError(f"Supplied INCALIB '{self.cfg.inCalFilePath}' is no valid file!")
     calFilenameRegex = re.compile(f"{self.cfg.inCalPrefix}_(.+)_raw_b(\\d+).txt:?\s")
@@ -468,13 +577,7 @@ class Sorter:
           # coresponding channel values (back by 0.5 and shrinked by 1/rawRebinningFactor used) and then applying the HDTV calibration
           calRebinningFactor = int(regexMatch.group(2))
           cal = cal(np.polynomial.Polynomial([-0.5, 1 / calRebinningFactor]))
-          # def cal(data: np.ndarray):
-          #   "Apply calibration polynomial to data, but not on NaNs for faster processing."
-          #   dataCal=np.full(data.shape, np.nan) # Need a new array as assignments take place below
-          #   nonNanIndices=~np.isnan(data)
-          #   dataCal[nonNanIndices]=cal(data[nonNanIndices])
-          #   return dataCal
-          self.calsDict[f"{self.cfg.outPrefix}_{regexMatch.group(1)}"] = cal
+          self.calibDict[regexMatch.group(1)] = TupleCalibration(cal.coef) # Store as TupleCalibration as they are hashable, i.e., useable as dict keys
 
   def constructHistsFromCfg(self: Sorter) -> None: #TODO make this more tidy
     "BACKLOG."
@@ -488,7 +591,7 @@ class Sorter:
           for binWidth, eMax in self.cfg.calHistBinningSpecs:
             bSpec = BinningSpec.constructZeroCenteredBinning(eMax, binWidth, False)
             try:
-              self.hists.append(Hist1D.constructSimpleHist1D(self.cfg.outPrefix, mod, channelNo, bSpec, self.calsDict))
+              self.hists.append(Hist1D.constructSimpleHist1D(self.cfg.outPrefix, mod, channelNo, bSpec, self.calibDict))
             except NoCalibrationFoundError:
               if not self.cfg.ignoreNoCalibrationFoundError:
                 raise
@@ -498,31 +601,27 @@ class Sorter:
           for binWidth, eMax in self.cfg.calHistBinningSpecs:
             bSpec = BinningSpec.constructZeroCenteredBinning(eMax, binWidth, False)
             try:
-              self.hists.append(Hist1D.constructAddbackHist1D(self.cfg.outPrefix, mod, addbackNo, channelNos, bSpec, self.calsDict))
+              self.hists.append(Hist1D.constructAddbackHist1D(self.cfg.outPrefix, mod, addbackNo, channelNos, bSpec, self.calibDict))
             except NoCalibrationFoundError:
               if not self.cfg.ignoreNoCalibrationFoundError:
                 raise
+    for acc in self.hists:
+      if hasattr(acc, "fillThreads"):
+        acc.fillThreads = self.cfg.histFillThreads
 
   def processModuleDictBatch(self: Sorter, moduleDictBatch: MvmeDataBatch) -> None:
     "BACKLOG."
+    lazyCachedAugmentedModuleBatch = LazyCachedAugmentedModuleBatch(moduleDictBatch, self.calibDict)
     for h in self.hists:
-      h.processModuleDictBatch(moduleDictBatch)
+      h.processModuleDictBatch(lazyCachedAugmentedModuleBatch)
 
-  # def openRoot(self: Sorter, function: Callable) -> None:
-  #   "BACKLOG"
-  #   if not os.path.isfile(self.cfg.rootFilePath):
-  #     raise ExplicitCheckFailedError(f"Supplied ROOTFILE '{self.cfg.rootFilePath}' is no valid file!")
-  #   uprootExecutor = uproot.ThreadPoolExecutor(num_workers=os.cpu_count())
-  #   with uproot.open(self.cfg.rootFilePath, num_workers=os.cpu_count(), decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) as rootFile:
-  #     function(rootFile)
-
-  @contextmanager
+  @contextlib.contextmanager
   def openRoot(self: Sorter) -> None:
     "Contextmanager (for with statements) to open ROOTFILE BACKLOG"
     if not os.path.isfile(self.cfg.rootFilePath):
       raise ExplicitCheckFailedError(f"Supplied ROOTFILE '{self.cfg.rootFilePath}' is no valid file!")
-    uprootExecutor = uproot.ThreadPoolExecutor(num_workers=os.cpu_count())
-    with uproot.open(self.cfg.rootFilePath, num_workers=os.cpu_count(), decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) as rootFile:
+    uprootExecutor = uproot.ThreadPoolExecutor(num_workers=self.cfg.uprootThreads)
+    with uproot.open(self.cfg.rootFilePath, num_workers=self.cfg.uprootThreads, decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) as rootFile:
       yield rootFile
 
   def iterateRoot(self: Sorter) -> None:
@@ -532,20 +631,15 @@ class Sorter:
       totalEntries = ev0.num_entries
       processedEntries = 0
       entriesToProcess = totalEntries * self.cfg.fractionOfEntriesToProcess if self.cfg.maxEntriesToProcess < 0 or totalEntries * self.cfg.fractionOfEntriesToProcess < self.cfg.maxEntriesToProcess else self.cfg.maxEntriesToProcess
-      self.cfg.printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f'- {totalEntries:.2e} entries {f"on file of which {entriesToProcess:.2e} entries are" if entriesToProcess != totalEntries else ""} to process.')
-      uprootExecutor = uproot.ThreadPoolExecutor(num_workers=os.cpu_count())
+      self.cfg.printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f'- {totalEntries:.2e} entries{f" on file of which {entriesToProcess:.2e} entries are" if entriesToProcess != totalEntries else ""} to process.')
+      uprootExecutor = uproot.ThreadPoolExecutor(num_workers=self.cfg.uprootThreads)
       if self.cfg.printProgress:
         startTime = datetime.datetime.now()
-        nextProgressPercentage = 0
-        nextProgressPercentageStepSize = 0.05
+        nextProgressFraction = 0
         nextProgressTime = startTime
       moduleDictBatch: MvmeDataBatch
-      for moduleDictBatch in ev0.iterate(tuple(self.cfg.mvmeModules), library="np", decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor, step_size=self.cfg.uprootIterateStepSize):
-        # readEntries += next(iter(moduleDictBatch.values())).shape[0]
-        # if (processedEntries/readEntries) >= self.cfg.fractionOfEntriesToProcess :
-        #   continue
-        # for mod, batch in moduleDictBatch.items():
-        #   moduleDictBatch[mod]=batch[:math.ceil(self.cfg.fractionOfEntriesToProcess*len(batch))]
+      for moduleDictBatch in iterateAhead(ev0.iterate(tuple(self.cfg.mvmeModules), library="np", decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor, step_size=self.cfg.uprootIterateStepSize)):
+        # self.cfg.printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "start")
         if self.cfg.fractionOfEntriesToProcess != 1:
           moduleDictBatch = {mod: batch[:math.ceil(self.cfg.fractionOfEntriesToProcess * len(batch))] for mod, batch in moduleDictBatch.items()}
         processedEntries += next(iter(moduleDictBatch.values())).shape[0]
@@ -557,11 +651,12 @@ class Sorter:
         self.processModuleDictBatch(moduleDictBatch)
         if self.cfg.printProgress:
           now = datetime.datetime.now()
-          if processedEntries / entriesToProcess >= nextProgressPercentage or now >= nextProgressTime or processedEntries == entriesToProcess:
-            nextProgressPercentage = round(processedEntries / entriesToProcess / nextProgressPercentageStepSize) * nextProgressPercentageStepSize + nextProgressPercentageStepSize
-            nextProgressTime = now + datetime.timedelta(minutes=3)
+          if processedEntries / entriesToProcess >= nextProgressFraction or now >= nextProgressTime or processedEntries == entriesToProcess:
+            nextProgressFraction = round(processedEntries / entriesToProcess / self.cfg.progressFractionThresholdStepSize) * self.cfg.progressFractionThresholdStepSize + self.cfg.progressFractionThresholdStepSize
+            nextProgressTime = now + datetime.timedelta(minutes=self.cfg.progressTimeThresholdStepSizeInMinutes)
             remainingSeconds = int((entriesToProcess / processedEntries - 1) * (now - startTime).total_seconds())
             self.cfg.printF(now.strftime("%Y-%m-%d %H:%M:%S"), f"- Processed {processedEntries:.2e} entries so far ({processedEntries/totalEntries:7.2%}) - ETA: {remainingSeconds//(60*60)}:{(remainingSeconds//60)%60:02}:{remainingSeconds%60:02} - Mean processing speed: {processedEntries/(now - startTime).total_seconds():.2e} entries/s", updatable=True)
+        # self.cfg.printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "stop")
       self.cfg.printF.makeLastLineUnUpdatable() # Make updateable line un-updateable (if any), i.e. leaving info about speed intact, even if any updatable prints follow
 
   def exportSpectra(self: Sorter):
@@ -601,7 +696,7 @@ def mvmeRoot2Spec(*cfg_args, **cfg_kw_args) -> Sorter:
   return srt
 
 
-def mvmeRoot2SpecCLI(argv: Iterable[str]) -> Sorter:
+def mvmeRoot2SpecCLI(argv: Sequence[str]) -> Sorter:
   "CLI interface to mvmeRoot2Spec, call mvmeRoot2SpecCLI(['-h']) to print the usage. Returns the Sorter object."
 
   def parseRawHistBinningSpecs(argStr: str) -> list[int]:
