@@ -60,10 +60,10 @@ RUN_STR: Final = "Run"
 FILE_EXT: Final = "txt"
 CALLST_EXT: Final = "callst"
 
+# Custom types
 MvmeModuleElement = NewType("MvmeModuleElement", str) # e.g. "clovers/amplitude[16]"
 MvmeDataBatch = dict[MvmeModuleElement, np.ndarray] # Shape of batch: (batchSize, channels)
 ChannelNo = NewType("ChannelNo", int)
-ChannelsDict = dict[MvmeModuleElement, Sequence[ChannelNo]]
 Calibration = Union[Callable[[np.ndarray], np.ndarray], "TupleCalibration", tuple[float, ...]]
 CalibDict = dict[str, Calibration]
 
@@ -79,10 +79,10 @@ class NoCalibrationFoundError(ExplicitCheckFailedError):
 
 
 def iterateAhead(iterator: Iterable) -> Iterator[Any]:
-  "BACKLOG."
+  "Wraps around an iterator and already starts computing every next iteration element in parallel via threading immediately after yielding an element. Useful for IO-bound iterators."
 
   class StopIterationSentinel:
-    "BACKLOG."
+    "Sentinel value used to indicate the occurrence of the StopIteration exception in the parallel thread"
 
   iterator = iter(iterator) # If already an Iterator this should have no effect (every Iterator should also be an Iterable)
   nextVal = next(iterator)
@@ -93,10 +93,9 @@ def iterateAhead(iterator: Iterable) -> Iterator[Any]:
       nextVal = future.result()
 
 
-class updateablePrint:
+class UpdateablePrint:
   """Basically a print function extended with the updatable keyword to overwrite/update successive prints on a terminal.
-  Successive calls with updatable=True will overwrite each others last output line using ANSI terminal escapes, if a terminal was detected.
-  """
+  Successive calls with updatable=True will overwrite each others last output line using ANSI terminal escapes, if a terminal was detected."""
   lastPrintUpdateable: bool = False # Used as a "static" variable of the function
   # Class could be improved in the follwing aspects:
   # Handle calls with different file keywords via a lastPrintUpdateable dict with files as keys
@@ -127,7 +126,7 @@ class updateablePrint:
 
   @classmethod
   def makeLastLineUnUpdatable(cls, **kw_args):
-    "BACKLOG."
+    "If the last printed line was flagged as updatable unset the flag and print a newline to counter the ANSI-cursor-up-escape."
     # Alternative: Just call cls(end="")
     if (cls.lastPrintUpdateable):
       print(end="\n", **kw_args) # If the last print was updateable the cursor will still be resting at the beginning of its line, hence move it down
@@ -171,19 +170,19 @@ class BinningSpec():
     return dict(bins=self.nBins, start=self.lowerEdge, stop=self.upperEdge)
 
   def getHDTVCalibrationStr(self) -> str:
-    "BACKLOG"
+    "Returns the string of calibration polynomial coefficients that is required in a HDTV calibration list file to calibrate exported histograms based on this BinningSpec in HDTV."
     # "   ".join(map(str, self.getHDTVCalibration()))
     return f"{self.binWidth/2+self.lowerEdge}   {self.binWidth}"
 
 
 class TupleCalibration(tuple):
-  "BACKLOG."
+  "Callable calibration polynomial based on a python tuple of the coefficients. Call instances of this class with a data array to calibrate the data accordingly."
 
   def __repr__(self) -> str:
     return f"{type(self).__name__}({super().__repr__()})"
 
   def __call__(self, data: np.ndarray) -> np.ndarray:
-    "BACKLOG."
+    "Returns the calibrated data array."
     result = np.full(data.shape, self[-1]) # Use Horner's method
     for coefficient in self[-2::-1]: # All elements but the last of self in reversed order
       result = result * data + coefficient
@@ -191,40 +190,43 @@ class TupleCalibration(tuple):
 
 
 class ScaleCalibration(TupleCalibration):
-  "BACKLOG."
+  "Callable rescaling calibration based on a TupleCalibration of 0 offset and the scaling factor. Call instances of this class with a data array to calibrate the data accordingly. More performant than TupleCalibration in rescaling cases."
   timeBinWidth: Final = 25 / 1024 # 25ns / 1024 was the used MDPP-16 TDC resolution, see also tdc_resolution in https://www.mesytec.com/products/datasheets/MDPP-16_SCP-RCP.pdf
 
   def __new__(cls, scalingFactor: float) -> ScaleCalibration:
-    "BACKLOG."
+    "Instantiates a scalingFactor object by using the underlying TupleCalibration/tuple __new__() method with a tuple of (0, scalingFactor)."
     return super().__new__(cls, (0, scalingFactor))
 
   def __repr__(self) -> str:
     return f"{type(self).__name__}({self[1]})"
 
   def __call__(self, data: np.ndarray) -> np.ndarray:
-    "BACKLOG."
-    return data * self[1]
+    "Returns the calibrated data array."
+    return data * self[1] # Faster than using TupleCalibration.__call__
 
   @property
   def scalingFactor(self) -> float:
-    "BACKLOG."
+    "Get the calibration's scaling factor."
     return self[1]
 
 
 @dataclasses.dataclass
 class LazyCachedAugmentedModuleBatch():
-  "BACKLOG."
-  data: dict[tuple[MvmeModuleElement, Union[ChannelNo, tuple[ChannelNo, ...]], Union[Literal["NonNaNMask"], tuple[float, ...], tuple[tuple[float, ...], ...]]], np.ndarray]
-  calibDict: dict[tuple[MvmeModuleElement, Union[ChannelNo, tuple[ChannelNo, ...]], Union[Literal["NonNaNMask"], tuple[float, ...], tuple[tuple[float, ...], ...]]], np.ndarray] = dataclasses.field(default_factory=dict)
+  "Container around/extending MvmeDataBatch that provides a data fetching interface, which also caches calibrated data or boolean NonNaNMasks numpy arrays."
+  data: dict[Union[MvmeModuleElement, tuple[MvmeModuleElement, Union[ChannelNo, tuple[ChannelNo, ...]], Union[Literal["NonNaNMask"], tuple[float, ...], tuple[tuple[float, ...], ...]]]], np.ndarray]
+  calibDict: CalibDict = dataclasses.field(default_factory=dict)
 
   def __getitem__(self, key: Union[MvmeModuleElement, tuple[MvmeModuleElement, Union[ChannelNo, tuple[ChannelNo, ...]], Union[Literal[True, False, "NonNaNMask"], CalibDict, Calibration, tuple[Calibration, ...]]]]) -> np.ndarray:
-    "BACKLOG"
+    "Shortcut to call getLazy method."
     if isinstance(key, tuple):
       return self.getLazy(*key)
     return self.getLazy(key)
 
   def getLazy(self, mod: MvmeModuleElement, channelNoOrNos: Union[ChannelNo, tuple[ChannelNo, ...]] = 0, cal: Union[Literal[True, False, "NonNaNMask"], CalibDict, Calibration, tuple[Calibration, ...]] = False) -> np.ndarray:
-    "BACKLOG."
+    """Fetch a module element's channel's data (or addback data when called with a tuple of channels) from the underlying MvmeDataBatch.
+    By providing calibration information (or just True to use the instance's calibDict) via the cal argument, calibrated data can be computed and fetched.
+    By providing 'NonNaNMask' as cal a boolean numpy array indicating the positions of non-NaN values and suitable for indexing on the belonging data is returned.
+    getLazy will try to cache any fetched data (only possible when the effective calibration is False, 'NoNNaNMask' or a tuple/TupleCalibration, i.e. not possible with generic Callables)."""
     # Don't have to filter for NaNs as boost histogram just puts them in the overflow-bin by convention: https://www.boost.org/doc/libs/1_77_0/libs/histogram/doc/html/histogram/rationale.html#histogram.rationale.uoflow
     if cal is False:
       return self.data[mod][:, channelNoOrNos]
@@ -270,8 +272,7 @@ class LazyCachedAugmentedModuleBatch():
 
 @dataclasses.dataclass
 class ExportSetting:
-  "BACKLOG." # Meant for automatic constrcution of histograms (mutliple! Raw, Cal, Time, and beam gated! With multiple Binnings!)
-  # masterSetting: ExportSetting = None # Redefine getattr to get from master
+  "Container for (export-) properties of multiple channels of a single module."
   module: str
   channels: Sequence[ChannelNo]
   addbackAutoGroup: dataclasses.InitVar[Optional[int]] = None # If not None addbackChannelsDict is constructed automatically by grouping consecutive channels together in groups of length addbackAutoGroup, grouping-remainder channels are ignored
@@ -300,21 +301,21 @@ class ExportSetting:
 
   @property
   def amplitudeModElem(self) -> MvmeModuleElement:
-    "BACKLOG."
+    "Get the MvmeModuleElement for the channels' amplitude data."
     return self.module + self.modulePropertyJoiner + self.amplitudeIdentifier
 
   @property
   def channelTimeModElem(self) -> MvmeModuleElement:
-    "BACKLOG."
+    "Get the MvmeModuleElement for the channels' signal times."
     return self.module + self.modulePropertyJoiner + self.channelTimeIdentifier
 
   @property
   def beamRFModElem(self) -> MvmeModuleElement:
-    "BACKLOG."
+    "Get the MvmeModuleElement for the beam RF's signal times (which resides in the module's trigger time data)."
     return self.beamRFSourceModule + self.modulePropertyJoiner + self.beamRFIdentifier
 
   def __post_init__(self, addbackAutoGroup) -> None:
-    "Called by __init__() generated by dataclasses.dataclass."
+    "Called by __init__() generated by dataclasses.dataclass. Sets derived default values and processes addbackAutoGroup information."
     self.channels = tuple(self.channels)
     if addbackAutoGroup is not None:
       self.addbackChannelsDict = {ch0 // addbackAutoGroup + 1: self.channels[ch0:ch0 + addbackAutoGroup] for ch0 in range(0, len(self.channels) - addbackAutoGroup + 1, addbackAutoGroup)}
@@ -365,7 +366,7 @@ class Config:
   fractionOfEntriesToProcess: float = 1
   progressFractionThresholdStepSize: float = 0.05
   progressTimeThresholdStepSizeInMinutes: float = 0 if sys.stdout.isatty() else 3
-  printF: updateablePrint = updateablePrint() # Must have keyword arg "updatable" in addition to usual print kw args
+  printF: UpdateablePrint = UpdateablePrint() # Must have keyword arg "updatable" in addition to usual print kw args
   mvmeModuleElements: Optional[Sequence[MvmeModuleElement]] = None
   mvmeModuleElementRenames: Optional[dict[MvmeModuleElement, MvmeModuleElement]] = None
   exportSettings: Sequence[ExportSetting] = None
@@ -398,7 +399,7 @@ class Config:
       self.mvmeModuleElements = set(mod for exportSetting in self.exportSettings for mod in (exportSetting.amplitudeModElem, exportSetting.channelTimeModElem, exportSetting.beamRFModElem))
 
   def rootFilePathToRunNo(self) -> int:
-    "BACKLOG."
+    "Tries to determine the run number from self.rootFilePath by searching it for the form mvmelst_{RUNNO}_raw. Raises an ExplicitCheckFailedError if unsuccessful."
     match = re.search("mvmelst_(\d+)_raw", os.path.basename(self.rootFilePath))
     if match:
       return int(match.group(1))
@@ -416,7 +417,7 @@ class Config:
     return filePath
 
   def buildSimpleHistsGeneric(self, calibDictOrFalse: Union[Literal[False], CalibDict], bSpecConstructor: Callable[..., BinningSpec] = BinningSpec.constructEdgeAlignedBinning, exStBinWidthsAttr: str = "amplitudeRawHistsRebinningFactors", exStHistsMaxAttr: str = "amplitudeRawDigitizerRange", exStModElemAttr: str = "amplitudeModElem", exStChAttr: str = "channels") -> list[Hist1D]:
-    "BACKLOG."
+    "Helper function to build and return all histograms (all channels and binnings) of all sorts of simple 1D Hist types (cal/raw Amplitude/Channel-Time/RF-Time) from self.exportSettings. The Attr arguments need to be the names of attributes of ExportSetting."
     hists = []
     for exSt in self.exportSettings:
       channels = getattr(exSt, exStChAttr)
@@ -428,28 +429,28 @@ class Config:
     return hists
 
   def buildSimpleHists(self, calibDictOrFalse: Union[Literal[False], CalibDict]) -> list[Hist1D]:
-    "BACKLOG."
+    "Builds and returns all channels' amplitude 1D histograms from self.exportSettings either calibrated or raw according to calibDictOrFalse."
     if calibDictOrFalse is False:
       return self.buildSimpleHistsGeneric(calibDictOrFalse, BinningSpec.constructEdgeAlignedBinning, "amplitudeRawHistsRebinningFactors", "amplitudeRawDigitizerRange", "amplitudeModElem", "channels")
     else:
       return self.buildSimpleHistsGeneric(calibDictOrFalse, BinningSpec.constructCenterAlignedBinning, "amplitudeCalHistsBinWidths", "amplitudeCalHistsMaxE", "amplitudeModElem", "channels")
 
   def buildSimpleChannelTimeHists(self, calibDictOrFalse: Union[Literal[False], CalibDict]) -> list[Hist1D]:
-    "BACKLOG."
+    "Builds and returns all channels' signal time 1D histograms from self.exportSettings either calibrated or raw according to calibDictOrFalse."
     if calibDictOrFalse is False:
       return self.buildSimpleHistsGeneric(calibDictOrFalse, BinningSpec.constructEdgeAlignedBinning, "timeRawHistsRebinningFactors", "timeChannelRawDigitizerRange", "channelTimeModElem", "channels")
     else:
       return self.buildSimpleHistsGeneric(calibDictOrFalse, BinningSpec.constructCenterAlignedBinning, "timeCalHistsBinWidths", "timeChannelCalHistsMaxT", "channelTimeModElem", "channels")
 
   def buildSimpleBeamRFHists(self, calibDictOrFalse: Union[Literal[False], CalibDict]) -> list[Hist1D]:
-    "BACKLOG."
+    "Builds and returns all beam RF 1D histograms from self.exportSettings either calibrated or raw according to calibDictOrFalse."
     if calibDictOrFalse is False:
       return self.buildSimpleHistsGeneric(calibDictOrFalse, BinningSpec.constructEdgeAlignedBinning, "timeRawHistsRebinningFactors", "timeBeamRFRawDigitizerRange", "beamRFModElem", "beamRFSourceChannel")
     else:
       return self.buildSimpleHistsGeneric(calibDictOrFalse, BinningSpec.constructCenterAlignedBinning, "timeCalHistsBinWidths", "timeBeamRFCalHistsMaxT", "beamRFModElem", "beamRFSourceChannel")
 
   def buildAddbackHists(self, calibDict: CalibDict) -> list[Hist1D]:
-    "BACKLOG."
+    "Builds and returns all addbacked amplitude 1D histograms from self.exportSettings."
     hists = []
     for exSt in self.exportSettings:
       for addbackNo, chNos in exSt.addbackChannelsDict.items():
@@ -460,7 +461,7 @@ class Config:
     return hists
 
   def buildSignalToRFTimeHists(self, calibDict: CalibDict) -> list[Hist1D]:
-    "BACKLOG."
+    "Builds and returns all channels' signal-time-to-RF-time difference histograms from self.exportSettings."
     hists = []
     for exSt in self.exportSettings:
       for chNo in exSt.channels:
@@ -470,7 +471,7 @@ class Config:
     return hists
 
   def buildSignalToRFTimeGatedHists(self, calibDict: Union[Literal[False], CalibDict], raw: bool = True) -> list[Hist1D]:
-    "BACKLOG."
+    "Builds and returns all channels' signal-time-to-RF-time-gated amplitude 1D histograms from self.exportSettings either calibrated or raw according to raw."
     hists = []
     for exSt in self.exportSettings:
       for chNo in exSt.channels:
@@ -487,7 +488,7 @@ class Config:
     return hists
 
   def buildAllHists(self, calibDict: CalibDict) -> list[Hist1D]:
-    "BACKLOG."
+    "Builds and returns all histograms from self.exportSettings according to the various self.buildHISTTYPE bool attributes."
     hists = []
     if self.buildRaw:
       hists += self.buildSimpleHists(False)
@@ -514,25 +515,25 @@ class Config:
 
 @dataclasses.dataclass
 class DataAccumulatorBase(abc.ABC):
-  "BACKLOG"
+  "Abstract base class for a data accumulator that in particular can process LazyCachedAugmentedModuleBatches via the processModuleDictBatch method."
   name: str
   detNoFormat: ClassVar[str] = "02"
   timeCalibrations: ClassVar[dict[str, Calibration]] = {prop: ScaleCalibration(ScaleCalibration.timeBinWidth) for prop in (ExportSetting.beamRFIdentifier, ExportSetting.channelTimeIdentifier)}
 
   @abc.abstractmethod
   def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
-    "BACKLOG."
+    "Abstract method to be implemented for processing a LazyCachedAugmentedModuleBatch."
     ...
 
   @abc.abstractmethod
-  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
-    "BACKLOG."
+  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[UpdateablePrint] = UpdateablePrint()):
+    "Abstract method to be implemented for exporting accumulated data/results."
     ...
 
   @classmethod
-  def createHistNamePart(cls, mod: MvmeModuleElement, label: str = DET_STR, channelNo: ChannelNo = 0, channelNoOffset: int = 1, propAppendix="") -> str:
-    "BACKLOG."
-    mod, _, prop = mod.partition(ExportSetting.modulePropertyJoiner)
+  def createHistNamePart(cls, modElem: MvmeModuleElement, label: str = DET_STR, channelNo: ChannelNo = 0, channelNoOffset: int = 1, propAppendix="") -> str:
+    "Classmethod to generate a part of a histogram name based only on one module's channel's information."
+    mod, _, prop = modElem.partition(ExportSetting.modulePropertyJoiner)
     mod = {"scintillators": "Sci", "clovers_up": "CUp", "clovers_down": "CDown", "zero_degree": "FanInFanOut", "clovers_sum": "FanInFanOut"}.get(mod, mod)
     if prop in (ExportSetting.amplitudeIdentifier, "integration_long[16]"):
       prop = "E"
@@ -548,38 +549,39 @@ class DataAccumulatorBase(abc.ABC):
 
   @classmethod
   def findCalib(cls, mod: MvmeModuleElement, channelNo: ChannelNo, calibDict: CalibDict) -> Calibration:
-    "BACKLOG."
+    "Classmethod to find a calibration for a module's channel in calibDict or from self.timeCalibrations. Raises NoCalibrationFoundError when no calibration could be found and ExplicitCheckFailedError if the found calibration is not a tuple(-subclass) or callable."
     cal = calibDict.get(cls.createHistNamePart(mod, DET_STR, channelNo), None)
     if cal is not None:
       if not (isinstance(cal, tuple) or callable(cal)):
-        raise ExplicitCheckFailedError("Calib not callable or poly coeffs BACKLOG")
+        raise ExplicitCheckFailedError(f"Found calibration for {cls.createHistNamePart(mod, DET_STR, channelNo)} is neither callable nor a tuple(-subclass) containing calibration polynomial coefficients. Found calibration is {cal}.")
       return cal
     for prop, cal in cls.timeCalibrations.items():
       if mod.endswith(prop):
         if not (isinstance(cal, tuple) or callable(cal)):
-          raise ExplicitCheckFailedError("Calib not callable or poly coeffs BACKLOG")
+          raise ExplicitCheckFailedError(f"Found calibration for {cls.createHistNamePart(mod, DET_STR, channelNo)} is neither callable nor a tuple(-subclass) containing calibration polynomial coefficients. Found calibration is {cal}.")
         return cal
-    raise NoCalibrationFoundError(f'No calib for {cls.createHistNamePart(mod, DET_STR, channelNo)} BACKLOG')
+    raise NoCalibrationFoundError(f'No calibration for {cls.createHistNamePart(mod, DET_STR, channelNo)} could be found.')
 
 
 @dataclasses.dataclass
 class DataAccumulator(DataAccumulatorBase):
-  "BACKLOG"
+  "Simple implementation for a data accumulator that forwards calls to processModuleDictBatch to self.dataProcessor and has a no-op export function."
   name: str
   dataProcessor: Callable[[DataAccumulator, LazyCachedAugmentedModuleBatch], None]
 
   def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
-    "BACKLOG."
+    "Processes a LazyCachedAugmentedModuleBatch by forwarding the call to self.dataProcessor."
     self.dataProcessor(self, data)
 
-  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
-    "BACKLOG."
+  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[UpdateablePrint] = UpdateablePrint()):
+    "Implements abstract method, but does nothing. Can be overwritten in instances or subclasses."
     pass
 
 
 @dataclasses.dataclass
 class Hist1D(DataAccumulatorBase):
-  "BACKLOG."
+  """Container for 1D histograms using self.h, a hist.Hist, to accumulate and hold the data, which is automatically instanciated according to self.binningSpec and filled in processModuleDictBatch with data selected/returned by self.dataProcessor.
+  Provides multiple construct... classmethods to construct typically requested histograms with appropriate name and dataProcessor."""
   name: str
   binningSpec: BinningSpec
   dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], np.ndarray]
@@ -594,11 +596,11 @@ class Hist1D(DataAccumulatorBase):
       self.fillThreads = type(self).fillThreads
 
   def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
-    "BACKLOG."
+    "Processes a LazyCachedAugmentedModuleBatch by calling self.dataProcessor on it and handing the returned array to self.h.fill."
     self.h.fill(self.dataProcessor(data), threads=self.fillThreads)
 
-  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
-    "BACKLOG."
+  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[UpdateablePrint] = UpdateablePrint()):
+    "Exports the accumulated histogram data to a text file in the directory outDir with its name based on self.name and its HDTV callibration information optionally appended to the open file handle calOutputFile."
     if printF is not None:
       printF("Writing", self.name, "...", updatable=True)
     outFilePath = os.path.join(outDir, f"{self.name}.{FILE_EXT}")
@@ -610,12 +612,12 @@ class Hist1D(DataAccumulatorBase):
 
   @classmethod
   def createHistName(cls, prefix: str, mod: MvmeModuleElement, label: str, channelNo: ChannelNo, cal: bool, binWidth: float, channelNoOffset: int = 1, propAppendix="") -> str:
-    "BACKLOG."
+    "Classmethod to generate a histogram name."
     return f'{prefix}_{cls.createHistNamePart(mod, label, channelNo, channelNoOffset, propAppendix)}_{CAL_STR if cal else RAW_STR}_{BINNING_STR}{binWidth}'
 
   @classmethod
   def constructSimpleHist1D(cls, prefix: str, mod: MvmeModuleElement, channelNo: ChannelNo, bSpec: BinningSpec, cal: Union[Literal[False], CalibDict, Calibration] = False, fillThreads: Optional[int] = None) -> Hist1D:
-    "BACKLOG."
+    "Classmethod to construct a simple raw or calibrated Hist1D of a single MvmeModuleElement's channel with appropriate name and dataProcessor."
     name = cls.createHistName(prefix, mod, DET_STR, channelNo, cal is not False, bSpec.binWidth)
     if isinstance(cal, dict):
       cal = cls.findCalib(mod, channelNo, cal)
@@ -623,17 +625,17 @@ class Hist1D(DataAccumulatorBase):
 
   @classmethod
   def constructAddbackHist1D(cls, prefix: str, mod: MvmeModuleElement, addbackNo: int, channelNos: tuple[ChannelNo, ...], bSpec: BinningSpec, cals: Union[CalibDict, tuple[Calibration, ...]], fillThreads: Optional[int] = None) -> Hist1D:
-    "BACKLOG."
+    "Classmethod to construct a simple addback Hist1D of an MvmeModuleElement's channels with appropriate name (using addbackNo) and dataProcessor."
     name = cls.createHistName(prefix, mod, ADDBACK_STR, addbackNo, True, bSpec.binWidth, channelNoOffset=0)
     if isinstance(cals, dict):
       cals = tuple(cls.findCalib(mod, channelNo, cals) for channelNo in channelNos)
     if len(cals) != len(channelNos):
-      raise ExplicitCheckFailedError("BACKLOG")
+      raise ExplicitCheckFailedError(f"Lengths of channelNos and cals must be equal. Got {cals:=} and {channelNos:=}")
     return cls(name, bSpec, lambda data: data.getLazy(mod, channelNos, cals)[data.getLazy(mod, channelNos, "NonNaNMask")], fillThreads)
 
   @classmethod
   def constructDifferenceHist1D(cls, prefix: str, mod1: MvmeModuleElement, channelNo1: ChannelNo, mod2: MvmeModuleElement, channelNo2: ChannelNo, bSpec: BinningSpec, cals: Union[Literal[False], CalibDict, Tuple[Calibration, Calibration]] = False, fillThreads: Optional[int] = None) -> Hist1D:
-    "BACKLOG."
+    "Classmethod to construct a difference histogram (Value1-Value2) of two MvmeModuleElement's channels with appropriate name and dataProcessor."
     name = f'{prefix}_{cls.createHistNamePart(mod1, DET_STR, channelNo1)}_-_{cls.createHistNamePart(mod2, DET_STR, channelNo2)}_{CAL_STR if cals is not False else RAW_STR}_{BINNING_STR}{bSpec.binWidth}'
     if isinstance(cals, dict):
       cals = (cls.findCalib(mod1, channelNo1, cals), cls.findCalib(mod2, channelNo2, cals))
@@ -644,7 +646,7 @@ class Hist1D(DataAccumulatorBase):
 
   @classmethod
   def constructSignalToRFTimeHist1D(cls, prefix: str, mod: MvmeModuleElement, channelNo: ChannelNo, bSpec: BinningSpec, cals: Union[Literal[False], CalibDict, Tuple[Calibration, Calibration]] = {}, modBeamRF: MvmeModuleElement = None, channelNoBeamRF: ChannelNo = ExportSetting.beamRFSourceChannel, fillThreads: Optional[int] = None) -> Hist1D:
-    "BACKLOG."
+    "Classmethod to construct a difference histogram of an MvmeModuleElement's channel's values minus the beam RF's values with appropriate name and dataProcessor. The beam RF's module element name will be derived from mod if it's None"
     if modBeamRF is None:
       modBeamRF = f"{mod.partition(ExportSetting.modulePropertyJoiner)[0]}{ExportSetting.modulePropertyJoiner}{ExportSetting.beamRFIdentifier}"
     hist = cls.constructDifferenceHist1D(prefix, mod, channelNo, modBeamRF, channelNoBeamRF, bSpec, cals, fillThreads)
@@ -653,7 +655,10 @@ class Hist1D(DataAccumulatorBase):
 
   @classmethod
   def constructSignalToRFTimeGatedHist1D(cls, prefix: str, mod: MvmeModuleElement, channelNo: ChannelNo, gateInterval: tuple[float, float], bSpec: BinningSpec, eCal: Union[Literal[False], CalibDict, Calibration] = False, tCals: Union[CalibDict, Tuple[Calibration, Calibration]] = {}, invertGate: bool = False, modBeamRF: MvmeModuleElement = None, channelNoBeamRF: ChannelNo = ExportSetting.beamRFSourceChannel, modTime: MvmeModuleElement = None, channelNoT: ChannelNo = None, gatePeriod: float = 179, fillThreads: Optional[int] = None) -> Hist1D:
-    "BACKLOG."
+    """Classmethod to construct a signal-time-to-RF-time-gated amplitude 1D histogram of an MvmeModuleElement's channel's raw or calibrated values. 's values minus the beam RF's values with appropriate name and dataProcessor.
+    The gate interval will be periodically repeated with a period of gatePeriod and the gate can be inverted (for off-beam gating) by invertGate=True.
+    The gate interval includes the lower edge and excludes the lower edge, i.e gateInterval=(x,y) mathematically is [x,y).
+    The beam RF's and signal time's module element names and channels will be derived from mod and channelNo if they're None."""
     if modBeamRF is None:
       modBeamRF = f"{mod.partition(ExportSetting.modulePropertyJoiner)[0]}{ExportSetting.modulePropertyJoiner}{ExportSetting.beamRFIdentifier}"
     if modTime is None:
@@ -667,13 +672,13 @@ class Hist1D(DataAccumulatorBase):
     name = cls.createHistName(prefix, mod, DET_STR, channelNo, eCal is not False, bSpec.binWidth, propAppendix=ON_BEAM_GATED_APPENDIX_STR if not invertGate else OFF_BEAM_GATED_APPENDIX_STR)
     lowerGate, upperGate = gateInterval
     if lowerGate >= upperGate:
-      raise ExplicitCheckFailedError("BACKLOG.")
+      raise ExplicitCheckFailedError(f"Invalid argument for gateInterval, the first element of the tuple must be strictly smaller than the second element. Got {gateInterval:=}.")
     lowerGate, upperGate = lowerGate % gatePeriod, upperGate % gatePeriod
     if lowerGate > upperGate:
       invertGate = not invertGate
       lowerGate, upperGate = upperGate, lowerGate
 
-    def dataProcessor(data: LazyCachedAugmentedModuleBatch) -> np.ndarray: #
+    def dataProcessor(data: LazyCachedAugmentedModuleBatch) -> np.ndarray:
       timeToRFData = (data.getLazy(modTime, channelNoT, tCals[0])[data.getLazy(mod, channelNo, "NonNaNMask")] - data.getLazy(modBeamRF, channelNoBeamRF, tCals[1])[data.getLazy(mod, channelNo, "NonNaNMask")]) % gatePeriod
       if not invertGate: # Through this if any events with NaNs in the time data will always be discarded, also it's faster than inverting the whole bool array
         return (data.getLazy(mod, channelNo, eCal)[data.getLazy(mod, channelNo, "NonNaNMask")])[lowerGate <= timeToRFData & timeToRFData < upperGate]
@@ -684,7 +689,8 @@ class Hist1D(DataAccumulatorBase):
 
 @dataclasses.dataclass
 class HistND(DataAccumulatorBase):
-  "BACKLOG."
+  """Container for n-D histograms using self.h, a hist.Hist, to accumulate and hold the data, which is automatically instanciated according to self.binningSpecs and filled in processModuleDictBatch with data selected/returned by self.dataProcessor.
+  Provides a constructSimpleHistND classmethod to construct a simple histogram with appropriate name and dataProcessor."""
   name: str
   binningSpecs: Sequence[BinningSpec]
   dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], Iterable[np.ndarray]]
@@ -704,23 +710,23 @@ class HistND(DataAccumulatorBase):
       self.fillThreads = type(self).fillThreads
 
   def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
-    "BACKLOG."
+    "Processes a LazyCachedAugmentedModuleBatch by calling self.dataProcessor on it and handing the unpacked returned iterable of arrays to self.h.fill."
     self.h.fill(*self.dataProcessor(data), threads=self.fillThreads)
 
-  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[updateablePrint] = updateablePrint()):
-    "NOT IMPLEMENTED YET."
-    # BACKLOG Implement this?
+  def export(self, outDir: str, calOutputFile: Optional[TextIO] = None, printF: Optional[UpdateablePrint] = UpdateablePrint()):
+    "Implements abstract method, but does nothing. Might be implemented in the future."
+    pass
 
   @classmethod
   def createHistName(cls, prefix: str, mods: Iterable[MvmeModuleElement], labels: Iterable[str], channelNos: Iterable[ChannelNo], cals: Iterable[bool], binWidths: Iterable[float]) -> str:
-    "BACKLOG."
+    "Classmethod to generate an n-D histogram name from iterables of the usual relevant information parts of each axes, the respective name parts stemming from each of the axes are seperated by '_VS_'."
     return prefix + "_VS_".join(f'{cls.createHistNamePart(mod, label, channelNo)}_{CAL_STR if cal else RAW_STR}_{BINNING_STR}{binWidth}' for mod, label, channelNo, cal, binWidth in zip(mods, labels, channelNos, cals, binWidths))
 
   __createHistName = createHistName # Use name mangling to get a private copy of the original function (used by constructSimpleHistND) in case a subclass overwrites it (e.g. Hist2D does that)
 
   @classmethod
   def constructSimpleHistND(cls, prefix: str, mods: Sequence[MvmeModuleElement], channelNos: Sequence[ChannelNo], bSpecs: Sequence[BinningSpec], cals: Union[Literal[False], CalibDict, Sequence[Union[Literal[False], CalibDict, Calibration]]] = False, fillThreads: Optional[int] = None) -> HistND:
-    "BACKLOG."
+    "Classmethod to construct a simple HistND of a single MvmeModuleElement's channel on each of the histograms axes with appropriate name and dataProcessor."
     if cals is False or isinstance(cals, dict):
       cals = itertools.repeat(cals)
     cals = [cls.findCalib(mod, channelNo, cal) if isinstance(cal, dict) else cal for mod, channelNo, cal in zip(mods, channelNos, cals)]
@@ -730,39 +736,44 @@ class HistND(DataAccumulatorBase):
 
 @dataclasses.dataclass
 class Hist2D(HistND):
-  "BACKLOG."
+  """Container for 2D histograms using self.h, a hist.Hist, to accumulate and hold the data, which is automatically instanciated according to self.binningSpecs and filled in processModuleDictBatch with data selected/returned by self.dataProcessor.
+  Provides a constructSimpleHist2D classmethod to construct a simple histogram with appropriate name and dataProcessor.
+  This class is basically just a wrapper in form of a subclass of/around HistND."""
   name: str
+  binningSpecs: Tuple[BinningSpec, BinningSpec]
   dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], Tuple[np.ndarray, np.ndarray]]
   dim: int = dataclasses.field(init=False, repr=False)
 
   def __init__(self, name: str, binningSpecsXandY: tuple[BinningSpec, BinningSpec], dataProcessor: Callable[[LazyCachedAugmentedModuleBatch], Tuple[np.ndarray, np.ndarray]], **histND_kw_args) -> None:
-    "BACKLOG."
+    "Forwards call to the HistND.__init__ method, but checks that the length of the BinningSpec tuple is indeed 2 and renames the binningSpecs argument to binningSpecsXandY."
     if len(binningSpecsXandY) != 2:
-      raise ExplicitCheckFailedError("BACKLOG.")
+      raise ExplicitCheckFailedError(f"Argument for binningSpecsXandY must have length 2 for a Hist2D. Got {binningSpecsXandY:=}.")
     return super().__init__(name, binningSpecsXandY, dataProcessor, **histND_kw_args)
 
   @property
   def binningSpecX(self) -> BinningSpec:
+    "Gets the x-axes' BinningSpec from self.binningSpecs."
     return self.binningSpecs[0]
 
   @property
   def binningSpecY(self) -> BinningSpec:
+    "Gets the y-axes' BinningSpec from self.binningSpecs."
     return self.binningSpecs[1]
 
   @classmethod
   def createHistName(cls, prefix: str, modX: MvmeModuleElement, labelX: str, channelNoX: ChannelNo, calX: bool, binWidthX: float, modY: MvmeModuleElement, labelY: str, channelNoY: ChannelNo, calY: bool, binWidthY: float) -> str:
-    "BACKLOG."
+    "Classmethod to generate an 2D histogram name from the usual relevant information parts of each axes, the respective name parts stemming from each of the two axes are seperated by '_VS_'."
     return super().createHistName(prefix, (modX, modY), (labelX, labelY), (channelNoX, channelNoY), (calX, calY), (binWidthX, binWidthY))
 
   @classmethod
   def constructSimpleHist2D(cls, prefix: str, modX: MvmeModuleElement, channelNoX: ChannelNo, bSpecX: BinningSpec, calX: Union[None, CalibDict, Calibration], modY: MvmeModuleElement, channelNoY: ChannelNo, bSpecY: BinningSpec, calY: Union[None, CalibDict, Calibration]) -> Hist2D:
-    "BACKLOG."
+    "Classmethod to construct a simple Hist2D of two MvmeModuleElement's channels, one on each of the histograms axes with appropriate name and dataProcessor."
     return super().constructSimpleHistND(prefix, (modX, modY), (channelNoX, channelNoY), (bSpecX, bSpecY), (calX, calY))
 
 
 @dataclasses.dataclass
 class Sorter:
-  "Instances process mvme ROOT files to spectra and store the (intermediate) results."
+  "Main interface class of mvmeRoot2Spec. Instances store a Config, CalibrationDict and their data accumulators (self.accs), handle mvme ROOT files and process them to spectra or other accumulated data forms via their registered accumulators."
   cfg: Config
   accs: list[DataAccumulatorBase] = dataclasses.field(default_factory=list)
   calibDict: CalibDict = dataclasses.field(default_factory=dict, init=False)
@@ -773,7 +784,7 @@ class Sorter:
       self.parseCal()
 
   def findAcc(self, name: str) -> Union[DataAccumulatorBase, tuple[DataAccumulatorBase, ...]]:
-    "BACKLOG."
+    "Search for data accumulators in self.accs by name. Returns all accumulators whose name attribute contains name. In case of a single match the match itself and otherwise a tuple of the matches is returned."
     matches = tuple(h for h in self.accs if name in h.name)
     if len(matches) == 1:
       return matches[0]
@@ -798,27 +809,27 @@ class Sorter:
           cal = cal(np.polynomial.Polynomial([-0.5, 1 / calRebinningFactor]))
           self.calibDict[regexMatch.group(1)] = TupleCalibration(cal.coef) # Store as TupleCalibration as they are hashable, i.e., useable as dict keys
 
-  def constructHistsFromCfg(self: Sorter) -> None:
-    "BACKLOG."
+  def buildHistsFromCfg(self: Sorter) -> None:
+    "Builds all histograms from self.cfg using self.cfg.buildAllHists(self.calibDict) and sets self.accs to its returned list."
     self.accs = self.cfg.buildAllHists(self.calibDict)
 
   @contextlib.contextmanager
   def openRoot(self: Sorter) -> None:
-    "Contextmanager (for with statements) to open ROOTFILE BACKLOG"
+    "Contextmanager (useable in with statements) to open the ROOT file self.cfg.rootFilePath."
     if not os.path.isfile(self.cfg.rootFilePath):
-      raise ExplicitCheckFailedError(f"Supplied ROOTFILE '{self.cfg.rootFilePath}' is no valid file!")
+      raise ExplicitCheckFailedError(f"ROOTFILE '{self.cfg.rootFilePath}' is no valid file!")
     uprootExecutor = uproot.ThreadPoolExecutor(num_workers=self.cfg.uprootThreads)
     with uproot.open(self.cfg.rootFilePath, num_workers=self.cfg.uprootThreads, decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) as rootFile:
       yield rootFile
 
   def processModuleDictBatch(self: Sorter, moduleDictBatch: MvmeDataBatch) -> None:
-    "BACKLOG."
+    "Processes an MvmeDataBatch by wrapping it in a LazyCachedAugmentedModuleBatch and handing this to all of the self.accs processModuleDictBatch methods."
     lazyCachedAugmentedModuleBatch = LazyCachedAugmentedModuleBatch(moduleDictBatch, self.calibDict)
     for h in self.accs:
       h.processModuleDictBatch(lazyCachedAugmentedModuleBatch)
 
   def iterateRoot(self: Sorter) -> None:
-    "Iterate over a mvme root file, handing each data batch to self.processModuleDictBatch."
+    "Iterate over a mvme root file according to self.cfg and handing each data batch to self.processModuleDictBatch."
     with self.openRoot() as rootFile:
       ev0: uproot.TBranch = rootFile['event0'] # Should actually be a TTree?
       totalEntries = ev0.num_entries
@@ -830,6 +841,17 @@ class Sorter:
         startTime = datetime.datetime.now()
         nextProgressFraction = 0
         nextProgressTime = startTime
+
+      def printProgress():
+        if self.cfg.printProgress:
+          nonlocal nextProgressFraction, nextProgressTime
+          now = datetime.datetime.now()
+          if processedEntries / entriesToProcess >= nextProgressFraction or now >= nextProgressTime or processedEntries == entriesToProcess:
+            nextProgressFraction = round(processedEntries / entriesToProcess / self.cfg.progressFractionThresholdStepSize) * self.cfg.progressFractionThresholdStepSize + self.cfg.progressFractionThresholdStepSize
+            nextProgressTime = now + datetime.timedelta(minutes=self.cfg.progressTimeThresholdStepSizeInMinutes)
+            remainingSeconds = int((entriesToProcess / processedEntries - 1) * (now - startTime).total_seconds())
+            self.cfg.printF(now.strftime("%Y-%m-%d %H:%M:%S"), f"- Processed {processedEntries:.2e} entries so far ({processedEntries/totalEntries:7.2%}) - ETA: {remainingSeconds//(60*60)}:{(remainingSeconds//60)%60:02}:{remainingSeconds%60:02} - Mean processing speed: {processedEntries/(now - startTime).total_seconds():.2e} entries/s", updatable=True)
+
       moduleDictBatch: MvmeDataBatch
       for moduleDictBatch in iterateAhead(ev0.iterate(tuple(self.cfg.mvmeModuleElements), library="np", decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor, step_size=self.cfg.uprootIterateStepSize)):
         if self.cfg.mvmeModuleElementRenames is not None:
@@ -839,17 +861,13 @@ class Sorter:
         processedEntries += next(iter(moduleDictBatch.values())).shape[0]
         if self.cfg.maxEntriesToProcess is not None and processedEntries >= self.cfg.maxEntriesToProcess:
           moduleDictBatch = {mod: batch[:len(batch) - (processedEntries - self.cfg.maxEntriesToProcess)] for mod, batch in moduleDictBatch.items()}
-          self.cfg.printF(f"Breaking BACKLOG")
+          processedEntries = self.cfg.maxEntriesToProcess
           self.processModuleDictBatch(moduleDictBatch)
+          printProgress()
+          self.cfg.printF("Stopping iteration as maximal amount of entries to process was reached.")
           break
         self.processModuleDictBatch(moduleDictBatch)
-        if self.cfg.printProgress:
-          now = datetime.datetime.now()
-          if processedEntries / entriesToProcess >= nextProgressFraction or now >= nextProgressTime or processedEntries == entriesToProcess:
-            nextProgressFraction = round(processedEntries / entriesToProcess / self.cfg.progressFractionThresholdStepSize) * self.cfg.progressFractionThresholdStepSize + self.cfg.progressFractionThresholdStepSize
-            nextProgressTime = now + datetime.timedelta(minutes=self.cfg.progressTimeThresholdStepSizeInMinutes)
-            remainingSeconds = int((entriesToProcess / processedEntries - 1) * (now - startTime).total_seconds())
-            self.cfg.printF(now.strftime("%Y-%m-%d %H:%M:%S"), f"- Processed {processedEntries:.2e} entries so far ({processedEntries/totalEntries:7.2%}) - ETA: {remainingSeconds//(60*60)}:{(remainingSeconds//60)%60:02}:{remainingSeconds%60:02} - Mean processing speed: {processedEntries/(now - startTime).total_seconds():.2e} entries/s", updatable=True)
+        printProgress()
       self.cfg.printF.makeLastLineUnUpdatable() # Make updateable line un-updateable (if any), i.e. leaving info about speed intact, even if any updatable prints follow
 
   def exportSpectra(self: Sorter):
@@ -869,14 +887,14 @@ class Sorter:
         h.export(self.cfg.outDir, calOutputFile, self.cfg.printF if self.cfg.verbose else None)
 
   def runSorting(self) -> None:
-    "BACKLOG."
-    self.constructHistsFromCfg()
+    "Calls self.buildHistsFromCfg(), self.iterateRoot(), and self.exportSpectra() in that order."
+    self.buildHistsFromCfg()
     self.iterateRoot()
     self.exportSpectra()
 
 
 def mvmeRoot2Spec(*cfg_args, **cfg_kw_args) -> Sorter:
-  "mvmeRoot2Spec main function, processes an mvme ROOT file to spectra and exports the result, returning the Sorter object."
+  "mvmeRoot2Spec main function, processes an mvme ROOT file to spectra by constructing/getting a Config from its args, then a Sorter from the Config, calling runSorting() of the Sorter and finally returning this Sorter object."
   if len(cfg_args) == 1 and len(cfg_kw_args) == 0 and isinstance(cfg_args[0], Config):
     cfg = cfg_args[0]
   else:
