@@ -679,10 +679,11 @@ class Hist1D(DataAccumulatorBase):
       lowerGate, upperGate = upperGate, lowerGate
 
     def dataProcessor(data: LazyCachedAugmentedModuleBatch) -> np.ndarray:
-      timeToRFData = (data.getLazy(modTime, channelNoT, tCals[0])[data.getLazy(mod, channelNo, "NonNaNMask")] - data.getLazy(modBeamRF, channelNoBeamRF, tCals[1])[data.getLazy(mod, channelNo, "NonNaNMask")]) % gatePeriod
-      if not invertGate: # Through this if any events with NaNs in the time data will always be discarded, also it's faster than inverting the whole bool array
-        return (data.getLazy(mod, channelNo, eCal)[data.getLazy(mod, channelNo, "NonNaNMask")])[lowerGate <= timeToRFData & timeToRFData < upperGate]
-      return (data.getLazy(mod, channelNo, eCal)[data.getLazy(mod, channelNo, "NonNaNMask")])[lowerGate > timeToRFData | timeToRFData >= upperGate]
+      nonNaNMaskData = data.getLazy(mod, channelNo, "NonNaNMask") & data.getLazy(modTime, channelNoT, "NonNaNMask") & data.getLazy(modBeamRF, channelNoBeamRF, "NonNaNMask")
+      timeToRFData = (data.getLazy(modTime, channelNoT, tCals[0])[nonNaNMaskData] - data.getLazy(modBeamRF, channelNoBeamRF, tCals[1])[nonNaNMaskData]) % gatePeriod
+      if not invertGate: # Likely faster than inverting the whole bool array
+        return (data.getLazy(mod, channelNo, eCal)[nonNaNMaskData])[(lowerGate <= timeToRFData) & (timeToRFData < upperGate)]
+      return (data.getLazy(mod, channelNo, eCal)[nonNaNMaskData])[(lowerGate > timeToRFData) | (timeToRFData >= upperGate)]
 
     return cls(name, bSpec, dataProcessor, fillThreads)
 
