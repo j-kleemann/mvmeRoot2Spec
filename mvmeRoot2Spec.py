@@ -58,7 +58,7 @@ TO_RF_APPENDIX_STR: Final = "ToRF"
 SORTED_STR: Final = "Sorted"
 RUN_STR: Final = "Run"
 FILE_EXT: Final = "txt"
-CALLST_EXT: Final = "callst"
+CALLST_EXT: Final = "callist"
 
 # Custom types
 MvmeModuleElement = NewType("MvmeModuleElement", str) # e.g. "clovers/amplitude[16]"
@@ -372,10 +372,11 @@ class Config:
   exportSettings: Sequence[ExportSetting] = None
   exportSettingsInitF: dataclasses.InitVar[Callable[[Config], Sequence[ExportSetting]]] = lambda cfg: [
     ExportSetting(module="clovers_up", channels=range(16), addbackAutoGroup=4),
-    ExportSetting(module="clovers_down", channels=range(8), addbackAutoGroup=4),
-    ExportSetting(module="scintillators", channels=range(14), amplitudeRawDigitizerRange=2**12, timeChannelRawDigitizerRange=2**14, amplitudeIdentifier="integration_long[16]", amplitudeRawHistsRebinningFactors=(1, ), amplitudeCalHistsBinWidths=(5, ), timeCalHistsBinWidths=(0.25, )),
-    ExportSetting(module="zero_degree" if cfg.rootFilePathToRunNo() <= 715 else "clovers_down" if cfg.rootFilePathToRunNo() <= 744 else "zero_degree" if cfg.rootFilePathToRunNo() <= 781 else "clovers_sum", channels=(15, ), timeCalHistsBinWidths=(5, ) if 715 < cfg.rootFilePathToRunNo() <= 744 else (), timeChannelRawDigitizerRange=2**13),
-    ExportSetting(module="zero_degree" if cfg.rootFilePathToRunNo() <= 781 else "clovers_sum", channels=(1, 2, 4, 5, 6, 8) if cfg.rootFilePathToRunNo() > 715 else (), timeCalHistsBinWidths=(), timeChannelRawDigitizerRange=2**13),
+    ExportSetting(module="clovers_down", channels=tuple(range(8)) + ((15,) if 715 < cfg.rootFilePathToRunNo() <= 744 else ()), addbackAutoGroup=4),
+    ExportSetting(module="scintillators", channels=range(14), amplitudeRawDigitizerRange=2**12, timeChannelRawDigitizerRange=2**14, amplitudeIdentifier="integration_long[16]", amplitudeCalHistsBinWidths=(5, ), timeCalHistsBinWidths=(0.25, )),
+    # ExportSetting(module="zero_degree" if cfg.rootFilePathToRunNo() <= 715 else "clovers_down" if cfg.rootFilePathToRunNo() <= 744 else "zero_degree" if cfg.rootFilePathToRunNo() <= 781 else "clovers_sum", channels=(15, ), timeCalHistsBinWidths=(1, ) if 715 < cfg.rootFilePathToRunNo() <= 744 else (), timeChannelRawDigitizerRange=2**13),
+    # The zero_degree/clovers_sum module didn't have an RF time signal attached to it. Without it, creating any time spectra for this module offers no real advantage.
+    ExportSetting(module="zero_degree" if cfg.rootFilePathToRunNo() <= 781 else "clovers_sum", channels=((1, 2, 4, 5, 6, 8) if 715 < cfg.rootFilePathToRunNo() else ()) + (() if 715 < cfg.rootFilePathToRunNo() <= 744 else (15, )), timeRawHistsRebinningFactors=(), timeCalHistsBinWidths=(), timeChannelRawDigitizerRange=2**13),
   ]
 
   def __post_init__(self, exportSettingsInitF) -> None:
