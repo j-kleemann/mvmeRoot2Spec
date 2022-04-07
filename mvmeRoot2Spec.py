@@ -372,7 +372,7 @@ class Config:
   exportSettings: Sequence[ExportSetting] = None
   exportSettingsInitF: dataclasses.InitVar[Callable[[Config], Sequence[ExportSetting]]] = lambda cfg: [
     ExportSetting(module="clovers_up", channels=range(16), addbackAutoGroup=4),
-    ExportSetting(module="clovers_down", channels=tuple(range(8)) + ((15,) if 715 < cfg.rootFilePathToRunNo() <= 744 else ()), addbackAutoGroup=4),
+    ExportSetting(module="clovers_down", channels=(0, 1, 2, 3, 7, 5, 6, 4) + ((15, ) if 715 < cfg.rootFilePathToRunNo() <= 744 else ()), addbackAutoGroup=4),
     ExportSetting(module="scintillators", channels=range(14), amplitudeRawDigitizerRange=2**12, timeChannelRawDigitizerRange=2**14, amplitudeIdentifier="integration_long[16]", amplitudeCalHistsBinWidths=(5, ), timeCalHistsBinWidths=(0.25, )),
     # ExportSetting(module="zero_degree" if cfg.rootFilePathToRunNo() <= 715 else "clovers_down" if cfg.rootFilePathToRunNo() <= 744 else "zero_degree" if cfg.rootFilePathToRunNo() <= 781 else "clovers_sum", channels=(15, ), timeCalHistsBinWidths=(1, ) if 715 < cfg.rootFilePathToRunNo() <= 744 else (), timeChannelRawDigitizerRange=2**13),
     # The zero_degree/clovers_sum module didn't have an RF time signal attached to it. Without it, creating any time spectra for this module offers no real advantage.
@@ -536,6 +536,7 @@ class DataAccumulatorBase(abc.ABC):
     "Classmethod to generate a part of a histogram name based only on one module's channel's information."
     mod, _, prop = modElem.partition(ExportSetting.modulePropertyJoiner)
     mod = {"scintillators": "Sci", "clovers_up": "CUp", "clovers_down": "CDown", "zero_degree": "FanInFanOut", "clovers_sum": "FanInFanOut"}.get(mod, mod)
+    channelNo = {(4, "CDown"): 7, (7, "CDown"): 4}.get((channelNo, mod), channelNo) # Correct for any erroneously swapped channels in the DAQ, e.g., here ELOG ID 1884
     if prop in (ExportSetting.amplitudeIdentifier, "integration_long[16]"):
       prop = "E"
     if prop == ExportSetting.channelTimeIdentifier:
