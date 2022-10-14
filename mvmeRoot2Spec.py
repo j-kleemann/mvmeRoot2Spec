@@ -31,6 +31,7 @@ Specifically aimed at the mvme DAQ used since 2021 at the High Intensity γ-ray 
 
 from __future__ import annotations
 import abc
+import fnmatch
 import itertools
 import sys
 import os
@@ -188,6 +189,37 @@ class BinningSpec():
     if val == 0: # Could also consider checking abs(val) < 1e-12 if rounding of subtraction results that should be 0 should pose problems at some point
       return 0
     return round(val, sigs - 1 - math.floor(math.log10(abs(val))))
+
+
+class GlobRegexDict(dict):
+  """Dict subclass offering glob/regex-based key lookups and meant to store spectra calibrations.
+
+  Subclasses dict overwriting get() and providing __missing__() method and a matchMode variable to enable calibration lookups based on glob or regex matching of dict keys to lookup key.
+  The matchMode instance variable defines whether to use only literal matches, globs or regex when looking up a calibration, the default is glob mode.
+  Note that in all modes a literally matching dict key is always preferred to globs/regex.
+  Note that other methods like __contains__() are not overwritten on purpose, so use "key in dict" to check for literally existing keys and dict[key] or get() to check for glob/regex matching keys."""
+
+  matchMode: Literal["literal", "glob", "regex"] = "glob"
+
+  def __missing__(self, key):
+    "Automatically called by dict[key] if there is no literally matching key in the dict."
+    if self.matchMode == "glob":
+      for dictKey, val in self.items():
+        if fnmatch.fnmatch(key, dictKey):
+          return val
+    elif self.matchMode == "regex":
+      for dictKey, val in self.items():
+        if re.fullmatch(dictKey, key):
+          return val
+    raise KeyError(key)
+
+  def get(self, key, default=None):
+    # Necessary re-implementation, because, unlike dict[key], dict.get(key), does not consider the __missing__() method
+    "Return the value for key if key is in the dictionary, else the value of a glob/regex (if enabled) matching key, else default."
+    try:
+      return self[key]
+    except KeyError:
+      return default
 
 
 class TupleCalibration(tuple):
@@ -359,6 +391,7 @@ class Config:
   inCalFilePath: Optional[str] = None
   inCalPrefix: Optional[str] = None
   ignoreNoCalibrationFoundError: bool = True
+  inCalEntryMatchMode: Literal["literal", "glob", "regex"] = "glob"
   outCalFilePath: Optional[str] = None
   verbose: bool = False
   printProgress: bool = True
@@ -419,7 +452,7 @@ class Config:
         4: (70, 150), # Remember: Erroneously swapped channels in the DAQ (ELOG ID 1884)
         15: (-50, 20),
       }),
-    ExportSetting(module="scintillators", channels=range(14), amplitudeRawDigitizerRange=2**12, timeChannelRawDigitizerRange=2**14, amplitudeIdentifier="integration_long[16]", amplitudeCalHistsBinWidths=(5, ), timeCalHistsBinWidths=(0.1, ), amplitudeSignalToRFTimeGateIntervalsDict={
+    ExportSetting(module="scintillators", channels=range(14), amplitudeRawDigitizerRange=2**12, timeChannelRawDigitizerRange=2**14, amplitudeIdentifier="integration_long[16]", amplitudeCalHistsBinWidths=(10, ), timeCalHistsBinWidths=(0.1, ), amplitudeSignalToRFTimeGateIntervalsDict={
       0: (-1, 6),
       1: (1, 8),
       2: (1, 8),
@@ -439,7 +472,7 @@ class Config:
     # The zero_degree/clovers_sum module didn't have an RF time signal attached to it. Without it, creating any time spectra for this module offers no real advantage.
     ExportSetting(module="zero_degree" if cfg.rootFilePathToRunNo() <= 781 else "clovers_sum", channels=((1, 2, 4, 5, 6, 8) if 715 < cfg.rootFilePathToRunNo() else ()) + (() if 715 < cfg.rootFilePathToRunNo() <= 744 else (15, )), timeRawHistsRebinningFactors=(), timeCalHistsBinWidths=(), timeChannelRawDigitizerRange=2**13),
   ]
-  runNoPrefixDict: dict[int, str] = dataclasses.field(default_factory=lambda: {712: "152Eu", 713: "154Sm@15.11MeV-Circ", 714: "natC@15.11MeV-Circ", 715: "56Co", 716: "NONE@15.11MeV-Circ", 717: "BEAM@15.11MeV-Circ", 718: "NONE", 719: "BEAM@15.11MeV-Lin", 720: "natC@15.11MeV-Lin", 721: "154Sm@15.11MeV-Lin", 722: "140Ce@15.11MeV-Lin", 723: "BEAM@15.11MeV-Lin", 724: "152Eu", 725: "BEAM@12.4MeV-Circ", 726: "140Ce@12.4MeV-Circ", 727: "140Ce@12.4MeV-Circ", 728: "140Ce@12.4MeV-Circ", 729: "154Sm@12.4MeV-Circ", 730: "154Sm@14.0MeV-Lin", 731: "154Sm@14.0MeV-Lin", 732: "140Ce@14.0MeV-Lin", 733: "BEAM@14.0MeV-Lin", 734: "56Co", 735: "152Eu", 736: "Mixd-Src", 737: "Mixd-Src", 738: "BEAM@11.36MeV-Lin", 739: "natSi@11.36MeV-Lin", 740: "BEAM@12.4MeV-Lin", 741: "154Sm@12.4MeV-Lin", 742: "140Ce@12.4MeV-Lin", 743: "EMPTY@12.4MeV-Lin", 744: "BEAM@12.4MeV-Lin", 745: "BEAM@14.0MeV-Circ", 746: "154Sm@14.0MeV-Circ", 747: "140Ce@14.0MeV-Circ", 748: "BEAM@14.0MeV-Circ", 749: "NONE", 750: "BEAM@15.11MeV-Circ", 751: "natC@15.11MeV-Circ", 752: "BEAM@15.11MeV-Circ", 753: "BEAM@15.9MeV-Circ", 754: "140Ce@15.9MeV-Circ", 755: "154Sm@15.9MeV-Circ", 756: "BEAM@15.9MeV-Circ", 757: "BEAM@15.9MeV-Lin", 758: "154Sm@15.9MeV-Lin", 759: "NONE", 760: "154Sm@15.9MeV-Lin", 761: "140Ce@15.9MeV-Lin", 762: "140Ce@15.9MeV-Lin", 763: "NONE", 764: "140Ce@15.9MeV-Lin", 765: "BEAM@15.9MeV-Lin", 766: "BEAM@17.5MeV-Lin", 767: "140Ce@17.5MeV-Lin", 768: "140Ce@17.5MeV-Lin", 769: "154Sm@17.5MeV-Lin", 770: "154Sm@17.5MeV-Lin", 771: "154Sm@17.5MeV-Lin", 772: "BEAM@17.5MeV-Lin", 773: "BEAM@17.5MeV-Circ", 774: "154Sm@17.5MeV-Circ", 775: "154Sm@17.5MeV-Circ", 776: "140Ce@17.5MeV-Circ", 777: "BEAM@17.5MeV-Circ", 778: "BEAM@9.626MeV-Circ", 779: "23Na@9.626MeV-Circ", 780: "BEAM@9.626MeV-Circ", 781: "BEAM@11.22MeV-Circ", 782: "140Ce@11.22MeV-Circ", 783: "154Sm@11.22MeV-Circ", 784: "BEAM@11.22MeV-Circ", 785: "BEAM@11.22MeV-Lin", 786: "154Sm@11.22MeV-Lin", 787: "154Sm@11.22MeV-Lin", 788: "140Ce@11.22MeV-Lin", 789: "BEAM@11.22MeV-Lin", 790: "natSi@11.22MeV-Lin", 791: "natMg@11.22MeV-Lin", 792: "natSi@11.22MeV-Circ", 793: "BEAM@11.22MeV-Circ", 794: "BEAM@15.11MeV-Circ", 795: "natC-XL@15.11MeV-Circ", 796: "natC-XL@15.11MeV-Circ", 797: "natC-XL@15.11MeV-Circ", 798: "natC-XL@15.11MeV-Circ", 799: "natC-XL@15.11MeV-Circ", 800: "natC-XL@15.11MeV-Circ", 801: "NONE", 802: "152Eu", 803: "60Co", 804: "56Co", 805: "NONE", }) # yapf: disable
+  runNoPrefixDict: dict[int, str] = dataclasses.field(default_factory=lambda: {712: "152Eu", 713: "154Sm@15.11MeV-Circ", 714: "natC@15.11MeV-Circ", 715: "56Co", 716: "NONE@15.11MeV-Circ", 717: "BEAM@15.11MeV-Circ", 718: "NONE", 719: "BEAM@15.11MeV-Lin", 720: "natC@15.11MeV-Lin", 721: "154Sm@15.11MeV-Lin", 722: "140Ce@15.11MeV-Lin", 723: "BEAM@15.11MeV-Lin", 724: "152Eu", 725: "BEAM@12.4MeV-Circ", 726: "140Ce@12.4MeV-Circ", 727: "140Ce@12.4MeV-Circ", 728: "140Ce@12.4MeV-Circ", 729: "154Sm@12.4MeV-Circ", 730: "154Sm@14.0MeV-Lin", 731: "154Sm@14.0MeV-Lin", 732: "140Ce@14.0MeV-Lin", 733: "BEAM@14.0MeV-Lin", 734: "56Co", 735: "152Eu", 736: "Mixd-Src", 737: "Mixd-Src", 738: "BEAM@11.36MeV-Lin", 739: "natSi@11.36MeV-Lin", 740: "BEAM@12.4MeV-Lin", 741: "154Sm@12.4MeV-Lin", 742: "140Ce@12.4MeV-Lin", 743: "EMPTY@12.4MeV-Lin", 744: "BEAM@12.4MeV-Lin", 745: "BEAM@14.0MeV-Circ", 746: "154Sm@14.0MeV-Circ", 747: "140Ce@14.0MeV-Circ", 748: "BEAM@14.0MeV-Circ", 749: "NONE", 750: "BEAM@15.11MeV-Circ", 751: "natC@15.11MeV-Circ", 752: "BEAM@15.11MeV-Circ", 753: "BEAM@15.9MeV-Circ", 754: "140Ce@15.9MeV-Circ", 755: "154Sm@15.9MeV-Circ", 756: "BEAM@15.9MeV-Circ", 757: "BEAM@15.9MeV-Lin", 758: "154Sm@15.9MeV-Lin", 759: "NONE", 760: "154Sm@15.9MeV-Lin", 761: "140Ce@15.9MeV-Lin", 762: "140Ce@15.9MeV-Lin", 763: "NONE", 764: "140Ce@15.9MeV-Lin", 765: "BEAM@15.9MeV-Lin", 766: "BEAM@17.5MeV-Lin", 767: "140Ce@17.5MeV-Lin", 768: "140Ce@17.5MeV-Lin", 769: "154Sm@17.5MeV-Lin", 770: "154Sm@17.5MeV-Lin", 771: "154Sm@17.5MeV-Lin", 772: "BEAM@17.5MeV-Lin", 773: "BEAM@17.5MeV-Circ", 774: "154Sm@17.5MeV-Circ", 775: "154Sm@17.5MeV-Circ", 776: "140Ce@17.5MeV-Circ", 777: "BEAM@17.5MeV-Circ", 778: "BEAM@9.626MeV-Circ", 779: "natNaCl@9.626MeV-Circ", 780: "BEAM@9.626MeV-Circ", 781: "BEAM@11.22MeV-Circ", 782: "140Ce@11.22MeV-Circ", 783: "154Sm@11.22MeV-Circ", 784: "BEAM@11.22MeV-Circ", 785: "BEAM@11.22MeV-Lin", 786: "154Sm@11.22MeV-Lin", 787: "154Sm@11.22MeV-Lin", 788: "140Ce@11.22MeV-Lin", 789: "BEAM@11.22MeV-Lin", 790: "natSi@11.22MeV-Lin", 791: "natMg@11.22MeV-Lin", 792: "natSi@11.22MeV-Circ", 793: "BEAM@11.22MeV-Circ", 794: "BEAM@15.11MeV-Circ", 795: "natC-XL@15.11MeV-Circ", 796: "natC-XL@15.11MeV-Circ", 797: "natC-XL@15.11MeV-Circ", 798: "natC-XL@15.11MeV-Circ", 799: "natC-XL@15.11MeV-Circ", 800: "natC-XL@15.11MeV-Circ", 801: "NONE", 802: "152Eu", 803: "60Co", 804: "56Co", 805: "NONE", }) # yapf: disable
 
 
   def __post_init__(self, exportSettingsInitF) -> None:
@@ -586,6 +619,9 @@ class DataAccumulatorBase(abc.ABC):
   name: str
   detNoFormat: ClassVar[str] = "02"
   timeCalibrations: ClassVar[dict[str, Calibration]] = {prop: ScaleCalibration(ScaleCalibration.timeBinWidth) for prop in (ExportSetting.beamRFIdentifier, ExportSetting.channelTimeIdentifier)}
+  # "ZeroDegree": "ZeroDegree" is in here, because "ZeroDegree" is a used abbreviation, just not accessed by a dict lookup, but hardcoded.
+  # Still, as the values of this dict are used by the Sorter.parseCal() method to identify glob calibrations, "ZeroDegree" is included in this dict.
+  mvmeModuleAbbreviations: ClassVar[dict[str, str]] = {"scintillators": "Sci", "clovers_up": "CUp", "clovers_down": "CDown", "zero_degree": "FanInFanOut", "clovers_sum": "FanInFanOut", "ZeroDegree": "ZeroDegree"}
 
   @abc.abstractmethod
   def processModuleDictBatch(self, data: LazyCachedAugmentedModuleBatch) -> None:
@@ -601,7 +637,7 @@ class DataAccumulatorBase(abc.ABC):
   def createHistNamePart(cls, modElem: MvmeModuleElement, label: str = DET_STR, channelNo: ChannelNo = 0, channelNoOffset: int = 1, propAppendix="") -> str:
     "Classmethod to generate a part of a histogram name based only on one module's channel's information."
     mod, _, prop = modElem.partition(ExportSetting.modulePropertyJoiner)
-    mod = {"scintillators": "Sci", "clovers_up": "CUp", "clovers_down": "CDown", "zero_degree": "FanInFanOut", "clovers_sum": "FanInFanOut"}.get(mod, mod)
+    mod = cls.mvmeModuleAbbreviations.get(mod, mod)
     channelNo = {(4, "CDown"): 7, (7, "CDown"): 4}.get((channelNo, mod), channelNo) # Correct for any erroneously swapped channels in the DAQ, e.g., here ELOG ID 1884
     if prop in (ExportSetting.amplitudeIdentifier, "integration_long[16]"):
       prop = "E"
@@ -845,10 +881,12 @@ class Sorter:
   "Main interface class of mvmeRoot2Spec. Instances store a Config, CalibrationDict and their data accumulators (self.accs), handle mvme ROOT files and process them to spectra or other accumulated data forms via their registered accumulators."
   cfg: Config
   accs: list[DataAccumulatorBase] = dataclasses.field(default_factory=list)
-  calibDict: CalibDict = dataclasses.field(default_factory=dict, init=False)
+  calibDict: CalibDict = dataclasses.field(default_factory=GlobRegexDict, init=False)
 
   def __post_init__(self) -> None:
     "Called by __init__() generated by dataclasses.dataclass. Here used to automatically parse the calibration file if one was specified in self.cfg."
+    if isinstance(self.calibDict, GlobRegexDict) or self.cfg.inCalEntryMatchMode != "literal":
+      self.calibDict.matchMode = self.cfg.inCalEntryMatchMode
     if self.cfg.inCalFilePath is not None:
       self.parseCal()
 
@@ -863,20 +901,33 @@ class Sorter:
     "Parse calibration file specified in self.cfg and store relevant found calibrations in self.calibDict."
     if self.cfg.inCalFilePath is None or not os.path.isfile(self.cfg.inCalFilePath):
       raise ExplicitCheckFailedError(f"Supplied INCALIB '{self.cfg.inCalFilePath}' is no valid file!")
-    calFilenameRegex = re.compile(f"{self.cfg.inCalPrefix}_(.+)_{RAW_STR}_{BINNING_STR}(\\d+)\\.{FILE_EXT}:?\s")
+    calFilenameRegex = re.compile(f"{self.cfg.inCalPrefix}_(?P<dictKey>.+)_{RAW_STR}_{BINNING_STR}(?P<binning>\\d+)\\.{FILE_EXT}\\s*")
+    calGlobFilenameRegexModuleOrPart = "|".join(map(str, set(DataAccumulatorBase.mvmeModuleAbbreviations.values())))
+    calGlobFilenameRegex = re.compile(f"(?P<prefixRegex>.+)_(?P<dictKey>(?:{calGlobFilenameRegexModuleOrPart})_[^_]+(?:_{DET_STR}_\\d+)?)_{RAW_STR}_{BINNING_STR}(?P<binning>\\d+)\\.{FILE_EXT}\\s*")
     with open(self.cfg.inCalFilePath) as f:
       for line in f:
-        regexMatch = calFilenameRegex.match(line) # Also filters out un-splitable blank lines
-        if regexMatch:
-          cal = np.polynomial.Polynomial([float(x) for x in line.split()[1:]])
-          # HDTV uses centered bins and exports the calibration matching this convention
-          # The MVME DAQ ROOT exporter however randomizes the integer channel values by adding a [0,1) uniform distributed random number, i.e. assuming a integer-edge binning
-          # Furthermore the raw data could have been binned with a binsize!=1 which hdtv does not know
-          # To correct for this difference in schemes, create the composition of first shifting the raw channels to the hdtv
-          # coresponding channel values (back by 0.5 and shrinked by 1/rawRebinningFactor used) and then applying the HDTV calibration
-          calRebinningFactor = int(regexMatch.group(2))
-          cal = cal(np.polynomial.Polynomial([-0.5, 1 / calRebinningFactor]))
-          self.calibDict[regexMatch.group(1)] = TupleCalibration(cal.coef) # Store as TupleCalibration as they are hashable, i.e., useable as dict keys
+        line = line.split("#")[0].strip() # Remove comments and whitespace
+        lineParts = line.rsplit(":", 1) # Split on last colon
+        if len(lineParts) != 2: # E.g., a comment only line or emtpy line
+          continue
+        regexMatch = calFilenameRegex.fullmatch(lineParts[0])
+        if not regexMatch:
+          if self.cfg.inCalEntryMatchMode == "literal":
+            continue
+          # Try matching a possible glob/regex calibration via a more flexible regex
+          regexMatch = re.fullmatch(calGlobFilenameRegex, lineParts[0])
+          # If it matches, check whether there is not already a calibration from a previous line of the calib file and also whether the inCalPrefix even matches the prefix of the glob/regex calibration
+          if not (regexMatch and regexMatch.group("dictKey") not in self.calibDict and (re.fullmatch(regexMatch.group("prefixRegex"), self.cfg.inCalPrefix) if self.cfg.inCalEntryMatchMode == "regex" else fnmatch.fnmatch(self.cfg.inCalPrefix, regexMatch.group(1)))):
+            continue
+        cal = np.polynomial.Polynomial([float(x) for x in lineParts[1].split()])
+        # HDTV uses centered bins and exports the calibration matching this convention
+        # The MVME DAQ ROOT exporter however randomizes the integer channel values by adding a [0,1) uniform distributed random number, i.e. assuming a integer-edge binning
+        # Furthermore the raw data could have been binned with a binsize!=1 which hdtv does not know
+        # To correct for this difference in schemes, create the composition of first shifting the raw channels to the hdtv
+        # coresponding channel values (back by 0.5 and shrinked by 1/rawRebinningFactor used) and then applying the HDTV calibration
+        calRebinningFactor = int(regexMatch.group("binning"))
+        cal = cal(np.polynomial.Polynomial([-0.5, 1 / calRebinningFactor]))
+        self.calibDict[regexMatch.group("dictKey")] = TupleCalibration(cal.coef) # Store as TupleCalibration as they are hashable, i.e., useable as dict keys
 
   def buildHistsFromCfg(self: Sorter) -> None:
     "Builds all histograms from self.cfg using self.cfg.buildAllHists(self.calibDict) and sets self.accs to its returned list."
