@@ -452,7 +452,7 @@ class Config:
         4: (70, 150), # Remember: Erroneously swapped channels in the DAQ (ELOG ID 1884)
         15: (-50, 20),
       }),
-    ExportSetting(module="scintillators", channels=range(14), amplitudeRawDigitizerRange=2**12, timeChannelRawDigitizerRange=2**14, amplitudeIdentifier="integration_long[16]", amplitudeCalHistsBinWidths=(10, ), timeCalHistsBinWidths=(0.1, ), amplitudeSignalToRFTimeGateIntervalsDict={
+    ExportSetting(module="scintillators", channels=range(14), amplitudeRawDigitizerRange=2**12, timeChannelRawDigitizerRange=2**14, amplitudeIdentifier="integration_long[16]", amplitudeCalHistsBinWidths=(10, 5, 1), timeCalHistsBinWidths=(0.1, ), amplitudeSignalToRFTimeGateIntervalsDict={
       0: (-1, 6),
       1: (1, 8),
       2: (1, 8),
