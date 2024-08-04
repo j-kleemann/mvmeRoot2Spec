@@ -986,7 +986,7 @@ class Sorter:
     "Contextmanager (useable in with statements) to open the ROOT file self.cfg.rootFilePath."
     if not os.path.isfile(self.cfg.rootFilePath):
       raise ExplicitCheckFailedError(f"ROOTFILE '{self.cfg.rootFilePath}' is no valid file!")
-    uprootExecutor = uproot.ThreadPoolExecutor(num_workers=self.cfg.uprootThreads)
+    uprootExecutor = uproot.ThreadPoolExecutor(self.cfg.uprootThreads)
     with uproot.open(self.cfg.rootFilePath, num_workers=self.cfg.uprootThreads, decompression_executor=uprootExecutor, interpretation_executor=uprootExecutor) as rootFile:
       yield rootFile
 
@@ -1004,7 +1004,7 @@ class Sorter:
       processedEntries = 0
       entriesToProcess = totalEntries * self.cfg.fractionOfEntriesToProcess if self.cfg.maxEntriesToProcess is None or totalEntries * self.cfg.fractionOfEntriesToProcess < self.cfg.maxEntriesToProcess else self.cfg.maxEntriesToProcess
       self.cfg.printF(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f'- {totalEntries:.2e} entries{f" on file of which {entriesToProcess:.2e} entries are" if entriesToProcess != totalEntries else ""} to process.')
-      uprootExecutor = uproot.ThreadPoolExecutor(num_workers=self.cfg.uprootThreads)
+      uprootExecutor = uproot.ThreadPoolExecutor(self.cfg.uprootThreads)
       if self.cfg.printProgress:
         startTime = datetime.datetime.now()
         nextProgressFraction = 0
